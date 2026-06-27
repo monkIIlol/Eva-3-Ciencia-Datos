@@ -34,14 +34,22 @@ X_scaled = scaler.fit_transform(X)
 # 4. Probar k de 2 a 10, guardando inercia y silhouette de cada uno
 inertias = []
 silhouettes = []
+k_range = list(range(2, 11))
 for k in range(2, 11):
     modelo = KMeans(n_clusters=k, random_state=29, n_init=10)
     modelo.fit(X_scaled)
     inertias.append(modelo.inertia_)
     silhouettes.append(silhouette_score(X_scaled, modelo.labels_))
 
+df_evaluacion_k = pd.DataFrame({
+    "k": k_range,
+    "inertia": inertias,
+    "silhouette": silhouettes,
+})
+df_evaluacion_k.to_csv("data/evaluacion_k.csv", index=False)
+
 # 5. Elegir el k óptimo con el método del codo (automático)
-kl = KneeLocator(range(2, 11), inertias, curve="convex", direction="decreasing")
+kl = KneeLocator(k_range, inertias, curve="convex", direction="decreasing")
 k_optimo = kl.elbow
 
 # 6. Entrenar el modelo final con el k óptimo

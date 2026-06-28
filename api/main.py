@@ -33,10 +33,12 @@ def dashboard_data():
     usuarios con su cluster asignado, centroides y métricas del modelo."""
     usuarios = pd.read_csv("data/usuarios_segmentados.csv")
     centroides = pd.read_csv("data/centroides.csv")
+    evaluacion_k = pd.read_csv("data/evaluacion_k.csv")
 
     return {
         "usuarios": usuarios.to_dict(orient="records"),
         "centroides": centroides.to_dict(orient="records"),
+        "evaluacion_k": evaluacion_k.to_dict(orient="records"),
         "metricas": metricas,
     }
 

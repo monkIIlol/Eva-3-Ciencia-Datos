@@ -76,9 +76,3 @@ docker compose up --build
 > Nota: la configuración por variables de entorno (`.env`) todavía no está
 > implementada — es una mejora pendiente. Por ahora, las credenciales de
 > Postgres están definidas directamente en `docker-compose.yml`.
-
-## Flujo de trabajo en Git
-
-Cada integrante trabaja en su propia rama (`feature/<nombre-de-la-parte>`) y
-todo cambio llega a `main` mediante Pull Request con revisión de al menos otro
-integrante. Ver [`docs/guia_contribucion.md`](docs/guia_contribucion.md).

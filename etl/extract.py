@@ -6,6 +6,7 @@ Fuente 2: perfil_usuarios         (tabla en Postgres, datos de perfil)
 
 Ambas se unen por id_cliente para formar el dataset consolidado.
 """
+import os
 import pandas as pd
 from sqlalchemy import create_engine
 
@@ -19,7 +20,14 @@ def extraer_csv(ruta="data/usuarios_streaming.csv"):
 
 def extraer_postgres():
     """Lee la fuente 2: la tabla perfil_usuarios desde Postgres."""
-    engine = create_engine("postgresql://admin:admin@postgres:5432/streaming_db")
+    usuario = os.getenv("POSTGRES_USER")
+    password = os.getenv("POSTGRES_PASSWORD")
+    host = os.getenv("POSTGRES_HOST")
+    puerto = os.getenv("POSTGRES_PORT")
+    base_datos = os.getenv("POSTGRES_DB")
+
+    url = f"postgresql://{usuario}:{password}@{host}:{puerto}/{base_datos}"
+    engine = create_engine(url)
     df = pd.read_sql("SELECT * FROM perfil_usuarios", engine)
     print(f"Postgres leído: {df.shape[0]} filas, {df.shape[1]} columnas")
     return df

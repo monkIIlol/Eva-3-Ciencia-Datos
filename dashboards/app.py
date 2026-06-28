@@ -84,6 +84,31 @@ with tab_ejecutiva:
         )
         st.plotly_chart(fig_torta, use_container_width=True)
 
+    st.subheader("Perfil de cada segmento")
+
+    perfil_ejecutivo = df.groupby("cluster")[[
+        "horas_consumo_mensual", "gasto_mensual", "cantidad_contenidos_vistos",
+        "antiguedad_cliente_meses", "porcentaje_uso_promociones", "dispositivos_registrados",
+    ]].mean()
+
+    # porcentaje_uso_promociones viene como fracción (0-1) en los datos crudos;
+    # se muestra como % para esta audiencia
+    perfil_ejecutivo["porcentaje_uso_promociones"] *= 100
+    perfil_ejecutivo = perfil_ejecutivo.round(1)
+
+    perfil_ejecutivo = perfil_ejecutivo.rename(columns={
+        "horas_consumo_mensual": "Horas de consumo (prom./mes)",
+        "gasto_mensual": "Gasto mensual (prom.)",
+        "cantidad_contenidos_vistos": "Contenidos vistos (prom.)",
+        "antiguedad_cliente_meses": "Antigüedad (meses, prom.)",
+        "porcentaje_uso_promociones": "Uso de promociones (%)",
+        "dispositivos_registrados": "Dispositivos (prom.)",
+    })
+    perfil_ejecutivo.index = [f"Cluster {c}" for c in perfil_ejecutivo.index]
+    perfil_ejecutivo.index.name = "Segmento"
+
+    st.dataframe(perfil_ejecutivo, use_container_width=True)
+
     st.subheader("Interpretación de negocio")
     for cluster in sorted(df["cluster"].unique()):
         n_usuarios = (df["cluster"] == cluster).sum()
@@ -166,17 +191,32 @@ with tab_operativa:
     )
 
     st.subheader("Comparación radial entre segmentos")
+
+    # Para el radar usamos un subconjunto curado de variables (no las 15):
+    # con tantos ejes el gráfico se vuelve ilegible para una audiencia.
+    # Elegimos las que mejor diferencian a los segmentos según el heatmap
+    # y la interpretación de negocio (ver Vista Ejecutiva).
+    variables_radar = [
+        "gasto_mensual", "porcentaje_finalizacion", "tiempo_promedio_sesion_min",
+        "porcentaje_uso_promociones", "antiguedad_cliente_meses",
+        "sesiones_semana", "cantidad_generos_consumidos",
+    ]
+
     fig_radar = go.Figure()
     for cluster in perfil_normalizado.index:
         fig_radar.add_trace(go.Scatterpolar(
-            r=perfil_normalizado.loc[cluster].values,
-            theta=variables_comparables,
+            r=perfil_normalizado.loc[cluster, variables_radar].values,
+            theta=variables_radar,
             fill="toself",
             name=f"Cluster {cluster}",
         ))
     fig_radar.update_layout(
         polar=dict(radialaxis=dict(visible=True, range=[0, 1])),
         showlegend=True,
-        title="Forma de cada segmento (variables normalizadas)",
+        height=500,
     )
     st.plotly_chart(fig_radar, use_container_width=True)
+    st.caption(
+        "Se muestran las variables que más diferencian a los segmentos. "
+        "Ver el mapa de calor anterior para el detalle de las 15 variables completas."
+    )

@@ -42,11 +42,11 @@
 └─────────────────────────────────────────────┘
 ## Orquestación de Contenedores (Docker Compose)
 
-El entorno completo se levanta de forma aislada y segura utilizando las variables de entorno definidas en el archivo `.env`:
+El entorno completo se levanta de forma aislada y segura utilizando las variables de entorno estandarizadas en el archivo `.env` (`POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `POSTGRES_HOST`, `POSTGRES_PORT` y `DATABASE_URL`):
 
 | Servicio | Imagen Base | Puerto Externo | Rol dentro del Sistema |
 |---|---|---|---|
-| `postgres` | `postgres:16-alpine` | `5432` | Base de datos relacional que aloja la tabla `perfil_usuarios`. |
+| `postgres` | `postgres:16-alpine` | `5432` | Base de datos relacional que aloja la tabla `perfil_usuarios` utilizando las credenciales seguras del entorno. |
 | `api` | `python:3.11-slim` | `8000` | Contenedor crítico. Ejecuta secuencialmente el pipeline ETL (`extract.py`), entrena el modelo KMeans (`train.py`) y activa el servidor FastAPI para servir los datos estructurados. |
 | `dashboard` | `python:3.11-slim` | `8501` | Aplicación web interactiva en Streamlit organizada por pestañas de audiencia (Ejecutiva, Técnica y Operativa). Consume los datos mediante peticiones HTTP internas. |
 
@@ -56,4 +56,4 @@ El entorno completo se levanta de forma aislada y segura utilizando las variable
 
 ## Decisiones de diseño relevantes
 
-Ver [`decisiones_diseno.md`](decisiones_diseno.md) para la justificación detallada de cada elección técnica (estructura limpia de carpetas, escalamiento de datos, selección analítica de $k=3$ y la distribución de gráficos por audiencias)
+Ver [`decisiones_diseno.md`](decisiones_diseno.md) para la justificación detallada de cada elección técnica.

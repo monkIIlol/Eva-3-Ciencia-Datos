@@ -8,9 +8,10 @@ model/train.py (clusters, centroides, métricas) para que el dashboard
 import pandas as pd
 import json
 import pickle
-
-from fastapi import FastAPI
+import os
+from fastapi import FastAPI, HTTPException
 import logging
+
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),

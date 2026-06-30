@@ -1,6 +1,6 @@
 # Segmentación de Usuarios de Streaming
 
-Proyecto E3 — SCY1101 Programación para la Ciencia de Datos 
+Proyecto E3 — SCY1101 Programación para la Ciencia de Datos
 
 Pipeline end-to-end que integra datos de consumo y perfil de usuarios de una
 plataforma de streaming, construye un modelo de segmentación con KMeans y
@@ -56,20 +56,41 @@ Diagrama completo en [`docs/arquitectura.md`](docs/arquitectura.md).
 
 ## Cómo correr el proyecto
 
-### Opción A: entorno local
+### Opción A: Docker (recomendado, levanta el sistema completo)
 
-```bash
-python -m venv venv
-source venv/bin/activate  # En Windows: venv\Scripts\activate
-pip install -r requirements.txt
-```
+Requiere tener Docker Desktop instalado y corriendo.
 
-Luego ver [`docs/guia_despliegue.md`](docs/guia_despliegue.md) para los pasos
-de configuración de Postgres y variables de entorno.
+1. Crea el archivo `.env` a partir de la plantilla incluida:
 
-### Validación de datos y pruebas automatizadas
+   ```bash
+   cp .env.example .env
+   ```
 
-Antes de ejecutar el modelo de segmentación, el proyecto incluye una etapa de validación de datos para revisar que las fuentes utilizadas en el pipeline ETL sean consistentes.
+   (En Windows, también puedes copiarlo manualmente desde el explorador de archivos.)
+
+2. Levanta todos los servicios:
+
+   ```bash
+   docker compose up --build
+   ```
+
+Esto inicia Postgres, ejecuta el pipeline (extracción + validación + entrenamiento)
+y levanta la API y el dashboard. Una vez arriba:
+
+- API: http://localhost:8000 (documentación interactiva en http://localhost:8000/docs)
+- Dashboard: http://localhost:8501
+
+Ver [`docs/guia_despliegue.md`](docs/guia_despliegue.md) para más detalle.
+
+### Opción B: validación y pruebas en entorno local
+
+La validación de datos y las pruebas automatizadas se pueden ejecutar
+localmente sin Docker (no requieren la base de datos). El pipeline completo,
+en cambio, está pensado para correr con Docker (Opción A).
+
+Antes de ejecutar el modelo de segmentación, el proyecto incluye una etapa de
+validación de datos para revisar que las fuentes utilizadas en el pipeline ETL
+sean consistentes.
 
 Para ejecutar la validación de datos:
 
@@ -112,15 +133,19 @@ Ran 8 tests in 0.035s
 OK
 ```
 
-Esta etapa ayuda a asegurar que los datos estén correctamente preparados antes de aplicar KMeans y utilizar los resultados en el dashboard.
+Esta etapa ayuda a asegurar que los datos estén correctamente preparados antes
+de aplicar KMeans y utilizar los resultados en el dashboard.
 
+## Configuración por variables de entorno
 
-### Opción B: Docker (recomendado para la demo)
+Las credenciales de conexión a Postgres se gestionan mediante variables de
+entorno, no están escritas en el código. El archivo `.env` (no versionado)
+contiene los valores reales, y `.env.example` sirve como plantilla de las
+variables necesarias: `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`,
+`POSTGRES_HOST` y `POSTGRES_PORT`.
 
-```bash
-docker compose up --build
-```
+## Flujo de trabajo en Git
 
-> Nota: la configuración por variables de entorno (`.env`) todavía no está
-> implementada — es una mejora pendiente. Por ahora, las credenciales de
-> Postgres están definidas directamente en `docker-compose.yml`.
+Cada integrante trabaja en su propia rama y todo cambio llega a `main`
+mediante Pull Request con revisión de al menos otro integrante. La rama `main`
+está protegida para requerir aprobación antes de fusionar.

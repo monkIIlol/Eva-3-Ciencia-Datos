@@ -6,3 +6,7 @@ data/evaluacion_k.csv
 __pycache__/
 *.pyc
 .venv/
+
+.env
+
+*.code-workspace

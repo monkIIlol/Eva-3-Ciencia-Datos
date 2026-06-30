@@ -35,37 +35,9 @@ def extraer_csv(ruta="data/usuarios_streaming.csv"):
 
 def extraer_postgres():
     """Lee la fuente 2: la tabla perfil_usuarios desde Postgres."""
-    usuario = os.getenv("POSTGRES_USER")
-    password = os.getenv("POSTGRES_PASSWORD")
-    host = os.getenv("POSTGRES_HOST")
-    puerto = os.getenv("POSTGRES_PORT")
-    base_datos = os.getenv("POSTGRES_DB")
-
-    faltantes = [
-        nombre
-        for nombre, valor in [
-            ("POSTGRES_USER", usuario),
-            ("POSTGRES_PASSWORD", password),
-            ("POSTGRES_HOST", host),
-            ("POSTGRES_PORT", puerto),
-            ("POSTGRES_DB", base_datos),
-        ]
-        if not valor
-    ]
-    if faltantes:
-        logger.error("Faltan variables de entorno requeridas: %s", faltantes)
-        raise EnvironmentError(f"Variables de entorno faltantes: {faltantes}")
-
-    url = f"postgresql://{usuario}:{password}@{host}:{puerto}/{base_datos}"
-
-    try:
-        engine = create_engine(url)
-        df = pd.read_sql("SELECT * FROM perfil_usuarios", engine)
-    except SQLAlchemyError:
-        logger.exception("Error al conectar o consultar Postgres en %s:%s", host, puerto)
-        raise
-
-    logger.info("Postgres leído: %s filas, %s columnas", df.shape[0], df.shape[1])
+    engine = create_engine("postgresql://admin:admin@postgres:5432/streaming_db")
+    df = pd.read_sql("SELECT * FROM perfil_usuarios", engine)
+    print(f"Postgres leído: {df.shape[0]} filas, {df.shape[1]} columnas")
     return df
 
 

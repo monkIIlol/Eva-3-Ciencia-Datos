@@ -165,6 +165,44 @@ with tab_tecnica:
 # VISTA OPERATIVA
 # ============================================================
 with tab_operativa:
+    st.subheader("Buscar usuario individual")
+    st.caption(
+        "Esta búsqueda no usa el filtro de la barra lateral: buscar un cliente "
+        "puntual es una operación distinta a explorar los segmentos seleccionados."
+    )
+
+    id_seleccionado = st.selectbox(
+        "id_cliente",
+        options=sorted(data["id_cliente"].unique()),
+    )
+
+    usuario = data[data["id_cliente"] == id_seleccionado].iloc[0]
+    cluster_usuario = int(usuario["cluster"])
+    centroide_cluster = centroides.iloc[cluster_usuario]
+
+    st.markdown(
+        f"**Cluster {cluster_usuario}** — {INTERPRETACIONES.get(cluster_usuario, '')}"
+    )
+
+    variables_lookup = [
+        "horas_consumo_mensual", "gasto_mensual", "cantidad_contenidos_vistos",
+        "antiguedad_cliente_meses", "porcentaje_uso_promociones", "dispositivos_registrados",
+    ]
+
+    comparacion_usuario = pd.DataFrame({
+        "Variable": variables_lookup,
+        "Usuario": [round(usuario[v], 2) for v in variables_lookup],
+        "Promedio del cluster": [round(centroide_cluster[v], 2) for v in variables_lookup],
+    })
+    comparacion_usuario["Diferencia vs. cluster"] = (
+        (comparacion_usuario["Usuario"] - comparacion_usuario["Promedio del cluster"])
+        / comparacion_usuario["Promedio del cluster"] * 100
+    ).round(1).astype(str) + "%"
+
+    st.dataframe(comparacion_usuario, use_container_width=True, hide_index=True)
+
+    st.divider()
+
     st.subheader("Tabla de usuarios")
     st.dataframe(df, use_container_width=True, height=300)
 
@@ -178,52 +216,58 @@ with tab_operativa:
     ]
 
     perfil_promedio = df.groupby("cluster")[variables_comparables].mean()
-
-    # Normalización min-max para la correcta visualización comparativa
     perfil_normalizado = (perfil_promedio - perfil_promedio.min()) / (
         perfil_promedio.max() - perfil_promedio.min()
     )
 
     st.subheader("Mapa de calor: variables por segmento")
-    fig_heatmap = px.imshow(
-        perfil_normalizado,
-        labels=dict(x="Variable", y="Cluster", color="Nivel relativo"),
-        aspect="auto",
-        color_continuous_scale="Blues",
-    )
-    fig_heatmap.update_yaxes(
-        tickvals=perfil_normalizado.index,
-        ticktext=[f"Cluster {c}" for c in perfil_normalizado.index],
-    )
+    fig_heatmap = go.Figure(data=go.Heatmap(
+        z=perfil_normalizado.values,
+        x=perfil_normalizado.columns,
+        y=[f"Cluster {c}" for c in perfil_normalizado.index],
+        text=perfil_promedio.round(1).values,
+        texttemplate="%{text}",
+        textfont=dict(size=10),
+        colorscale="Blues",
+        colorbar=dict(title="Nivel<br>relativo"),
+    ))
+    fig_heatmap.update_layout(xaxis_title="Variable", yaxis_title="Cluster")
     st.plotly_chart(fig_heatmap, use_container_width=True)
     st.caption(
-        "Valores normalizados (0-1) por variable, para comparar el nivel relativo "
-        "de cada segmento en cada métrica, independientemente de su escala original."
+        "El color indica la posición relativa de cada segmento en esa variable "
+        "(más oscuro = más alto entre los 3 clusters). El número en cada celda "
+        "es el valor real (escala original), no el normalizado."
     )
 
-    st.subheader("Comparación radial entre segmentos")
+    st.subheader("Comparación de segmentos en variables clave")
 
-    variables_radar = [
+    variables_destacadas = [
         "gasto_mensual", "porcentaje_finalizacion", "tiempo_promedio_sesion_min",
         "porcentaje_uso_promociones", "antiguedad_cliente_meses",
         "sesiones_semana", "cantidad_generos_consumidos",
     ]
 
-    fig_radar = go.Figure()
-    for cluster in perfil_normalizado.index:
-        fig_radar.add_trace(go.Scatterpolar(
-            r=perfil_normalizado.loc[cluster, variables_radar].values,
-            theta=variables_radar,
-            fill="toself",
-            name=f"Cluster {cluster}",
-        ))
-    fig_radar.update_layout(
-        polar=dict(radialaxis=dict(visible=True, range=[0, 1])),
-        showlegend=True,
-        height=500,
+    datos_comparacion = perfil_normalizado[variables_destacadas].reset_index()
+    datos_comparacion = datos_comparacion.melt(
+        id_vars="cluster", var_name="variable", value_name="nivel_relativo"
     )
-    st.plotly_chart(fig_radar, use_container_width=True)
+    datos_comparacion["cluster"] = "Cluster " + datos_comparacion["cluster"].astype(str)
+
+    fig_comparacion = px.bar(
+        datos_comparacion,
+        x="variable",
+        y="nivel_relativo",
+        color="cluster",
+        barmode="group",
+        labels={
+            "variable": "Variable",
+            "nivel_relativo": "Nivel relativo (0-1)",
+            "cluster": "Segmento",
+        },
+    )
+    fig_comparacion.update_layout(xaxis_tickangle=-30)
+    st.plotly_chart(fig_comparacion, use_container_width=True)
     st.caption(
-        "Se muestran las variables que más diferencian a los segmentos. "
-        "Ver el mapa de calor anterior para el detalle de las 15 variables completas."
+        "Mismas variables y misma normalización que el mapa de calor, en formato "
+        "de barras agrupadas — más preciso de leer que un gráfico radial."
     )

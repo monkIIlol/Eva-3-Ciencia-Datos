@@ -5,6 +5,7 @@ Consume la API (api/main.py) vía HTTP. Organizado en 3 vistas según
 audiencia (ejecutiva, técnica, operativa), con un filtro global de
 segmentos en la barra lateral que afecta a las tres pestañas.
 """
+import time
 import pandas as pd
 import plotly.express as px
 import requests
@@ -14,8 +15,6 @@ import plotly.graph_objects as go
 st.set_page_config(page_title="Segmentación de Usuarios — Streaming", layout="wide")
 
 # --- Interpretación de negocio por cluster ---
-# Completada a partir del análisis de los centroides reales.
-# Ver docs/decisiones_diseno.md para la justificación de cada etiqueta.
 INTERPRETACIONES = {
     0: "Usuarios habituales exploradores: sesiones frecuentes pero cortas, consumo moderado.",
     1: "Usuarios nuevos sensibles a precio: baja antigüedad, alto uso de promociones, bajo consumo.",
@@ -25,16 +24,31 @@ INTERPRETACIONES = {
 
 @st.cache_data
 def load_data():
-    """Obtiene usuarios, centroides y métricas desde la API."""
-    respuesta = requests.get("http://api:8000/dashboard-data")
-    payload = respuesta.json()
-    usuarios = pd.DataFrame(payload["usuarios"])
-    centroides = pd.DataFrame(payload["centroides"])
-    evaluacion_k = pd.DataFrame(payload["evaluacion_k"])
-    metricas = payload["metricas"]
-    return usuarios, centroides, evaluacion_k, metricas
+    """Obtiene usuarios, centroides y métricas desde la API, esperando si no está lista."""
+    url = "http://api:8000/dashboard-data"
+    max_intentos = 15
+    
+    for intento in range(max_intentos):
+        try:
+            respuesta = requests.get(url)
+            if respuesta.status_code == 200:
+                payload = respuesta.json()
+                usuarios = pd.DataFrame(payload["usuarios"])
+                centroides = pd.DataFrame(payload["centroides"])
+                evaluacion_k = pd.DataFrame(payload["evaluacion_k"])
+                metricas = payload["metricas"]
+                return usuarios, centroides, evaluacion_k, metricas
+        except requests.exceptions.ConnectionError:
+            st.sidebar.info(f"Esperando que la API se inicialice... (Intento {intento + 1}/{max_intentos})")
+            time.sleep(3)
+            
+    st.error("No se pudo conectar con la API de segmentación. Verifica si el contenedor 'api' inició correctamente.")
+    st.stop()
 
 
+# ============================================================
+# LLAMADA A LA FUNCIÓN Y ASIGNACIÓN DE VARIABLES (CORREGIDO)
+# ============================================================
 data, centroides, evaluacion_k, metricas = load_data()
 
 st.title("Segmentación de Usuarios — Streaming")
@@ -86,13 +100,12 @@ with tab_ejecutiva:
 
     st.subheader("Perfil de cada segmento")
 
-    perfil_ejecutivo = df.groupby("cluster")[[
-        "horas_consumo_mensual", "gasto_mensual", "cantidad_contenidos_vistos",
-        "antiguedad_cliente_meses", "porcentaje_uso_promociones", "dispositivos_registrados",
-    ]].mean()
+    perfil_ejecutivo = df.groupby("cluster")[
+        ["horas_consumo_mensual", "gasto_mensual", "cantidad_contenidos_vistos",
+         "antiguedad_cliente_meses", "porcentaje_uso_promociones", "dispositivos_registrados"]
+    ].mean()
 
-    # porcentaje_uso_promociones viene como fracción (0-1) en los datos crudos;
-    # se muestra como % para esta audiencia
+    # porcentaje_uso_promociones viene como fracción (0-1) en los datos crudos; se muestra como %
     perfil_ejecutivo["porcentaje_uso_promociones"] *= 100
     perfil_ejecutivo = perfil_ejecutivo.round(1)
 
@@ -117,7 +130,7 @@ with tab_ejecutiva:
         st.markdown(f"**Cluster {cluster}** ({n_usuarios} usuarios, {pct:.1f}%): {descripcion}")
 
 # ============================================================
-# VISTA TÉCNICA Y OPERATIVA 
+# VISTA TÉCNICA
 # ============================================================
 with tab_tecnica:
     st.subheader("Selección del número de clusters (k)")
@@ -148,12 +161,13 @@ with tab_tecnica:
         "Se confirma cruzándolo con el punto de mayor Silhouette."
     )
 
+# ============================================================
+# VISTA OPERATIVA
+# ============================================================
 with tab_operativa:
     st.subheader("Tabla de usuarios")
     st.dataframe(df, use_container_width=True, height=300)
 
-    # Variables numéricas relevantes para comparar segmentos
-    # (se excluyen id_cliente, cluster, pc1, pc2: no son variables de comportamiento)
     variables_comparables = [
         "horas_consumo_mensual", "gasto_mensual", "cantidad_contenidos_vistos",
         "sesiones_semana", "porcentaje_finalizacion", "tiempo_promedio_sesion_min",
@@ -165,10 +179,7 @@ with tab_operativa:
 
     perfil_promedio = df.groupby("cluster")[variables_comparables].mean()
 
-    # Normalizar 0-1 por variable: así el heatmap y el radar comparan
-    # "qué tan alto relativo a los otros clusters", no escalas absolutas
-    # (ej. gasto_mensual ~$300 vs porcentaje_uso_promociones ~0.3 no se podrían
-    # comparar visualmente sin esto)
+    # Normalización min-max para la correcta visualización comparativa
     perfil_normalizado = (perfil_promedio - perfil_promedio.min()) / (
         perfil_promedio.max() - perfil_promedio.min()
     )
@@ -192,10 +203,6 @@ with tab_operativa:
 
     st.subheader("Comparación radial entre segmentos")
 
-    # Para el radar usamos un subconjunto curado de variables (no las 15):
-    # con tantos ejes el gráfico se vuelve ilegible para una audiencia.
-    # Elegimos las que mejor diferencian a los segmentos según el heatmap
-    # y la interpretación de negocio (ver Vista Ejecutiva).
     variables_radar = [
         "gasto_mensual", "porcentaje_finalizacion", "tiempo_promedio_sesion_min",
         "porcentaje_uso_promociones", "antiguedad_cliente_meses",

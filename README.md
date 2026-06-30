@@ -43,7 +43,7 @@ Diagrama completo en [`docs/arquitectura.md`](docs/arquitectura.md).
 
 ```
 .
-├── etl/            # Pipeline de extracción e integración de fuentes
+├── etl/            # Pipeline de extracción, validación e integración de fuentes
 ├── model/          # Entrenamiento de KMeans, selección de k, perfilamiento de clusters
 ├── api/            # API REST que expone el modelo entrenado (FastAPI)
 ├── dashboards/     # Dashboard interactivo
@@ -66,6 +66,54 @@ pip install -r requirements.txt
 
 Luego ver [`docs/guia_despliegue.md`](docs/guia_despliegue.md) para los pasos
 de configuración de Postgres y variables de entorno.
+
+### Validación de datos y pruebas automatizadas
+
+Antes de ejecutar el modelo de segmentación, el proyecto incluye una etapa de validación de datos para revisar que las fuentes utilizadas en el pipeline ETL sean consistentes.
+
+Para ejecutar la validación de datos:
+
+```bash
+python etl/validate.py
+```
+
+En Windows, si se usa Python Launcher:
+
+```bash
+py -3.11 etl/validate.py
+```
+
+Esta validación revisa:
+
+* columnas esperadas en cada fuente;
+* valores nulos;
+* duplicados en `id_cliente`;
+* tipos de datos numéricos;
+* coincidencia de usuarios entre `usuarios_streaming.csv` y `perfil_usuarios.csv`;
+* correcta integración del dataset final.
+
+Además, el proyecto cuenta con pruebas automatizadas para validar las fuentes de datos:
+
+```bash
+python -m unittest tests/test_validacion_datos.py
+```
+
+En Windows, si se usa Python Launcher:
+
+```bash
+py -3.11 -m unittest tests/test_validacion_datos.py
+```
+
+Si las pruebas se ejecutan correctamente, se espera una salida similar a:
+
+```text
+Ran 8 tests in 0.035s
+
+OK
+```
+
+Esta etapa ayuda a asegurar que los datos estén correctamente preparados antes de aplicar KMeans y utilizar los resultados en el dashboard.
+
 
 ### Opción B: Docker (recomendado para la demo)
 

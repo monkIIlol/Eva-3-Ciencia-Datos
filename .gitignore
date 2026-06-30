@@ -3,4 +3,8 @@ data/usuarios_segmentados.csv
 data/centroides.csv
 data/evaluacion_k.csv
 
+__pycache__/
+*.pyc
+.venv/
+
 .env

@@ -1,112 +1,40 @@
-# Contexto de Negocio
+# Contexto de Negocio y Segmentación de Usuarios
 
-## 1. Descripción del problema
+## 1. ¿Cuál es el problema que queremos resolver?
+La empresa de streaming ha observado un aumento en la tasa de abandono de sus clientes, lo que afecta sus ingresos y eleva los costos de adquisición de nuevos usuarios. Para enfrentar este problema, busca comprender el comportamiento de sus clientes mediante técnicas de segmentación que permitan diseñar estrategias de retención, personalizar campañas y ofrecer recomendaciones más efectivas.
+* Dar recomendaciones de contenido personalizadas según lo que realmente ven.
+* Crear campañas de retención enfocadas en los usuarios que están pensando en dejar el servicio.
+* Armar promociones o beneficios exclusivos para los usuarios más fieles y que más gastan.
 
-Una empresa de streaming digital busca mejorar la experiencia de sus usuarios mediante estrategias más personalizadas. Actualmente, la plataforma entrega recomendaciones y beneficios de forma general, sin diferenciar claramente los distintos tipos de usuarios que existen dentro del servicio.
+El desafío técnico es que la información está repartida. Los datos de lo que consume el usuario están en un archivo, y los datos de su perfil están en otro sistema. Por eso, el primer paso antes de meter cualquier modelo es juntar y ordenar todo en un solo lugar.
 
-Esto genera una oportunidad de mejora, ya que no todos los usuarios tienen el mismo comportamiento. Algunos consumen muchas horas de contenido, otros utilizan promociones con mayor frecuencia, algunos tienen baja antigüedad y otros presentan un comportamiento más estable y leal.
+---
 
-Por esta razón, el objetivo del proyecto es identificar segmentos de usuarios con características similares, utilizando técnicas de aprendizaje no supervisado.
+## 2. Las fuentes de datos que usamos
 
-## 2. Necesidad del negocio
+Unimos toda la información usando el `id_cliente` como llave principal, cruzando estas dos fuentes:
 
-La empresa necesita comprender mejor a sus usuarios para tomar decisiones más específicas en áreas como:
+### Datos de consumo (`usuarios_streaming.csv`)
+Tiene el registro mensual de cómo usan la plataforma:
+* **Horas de consumo y contenidos vistos:** Para saber qué tan activos son.
+* **Gasto mensual:** Cuánto dinero le ingresa a la empresa por ese usuario.
+* **Sesiones por semana y duración promedio:** Qué tan seguido entran y cuánto tiempo se quedan.
+* **Porcentaje de finalización:** Si terminan las series y películas o las dejan a medias.
+* **Géneros consumidos y uso de promociones:** Qué tan variados son sus gustos y si buscan siempre los descuentos.
+* **Antigüedad:** Cuántos meses llevan siendo clientes.
 
-* recomendaciones personalizadas de contenido;
-* campañas de retención;
-* beneficios para usuarios frecuentes;
-* estrategias para aumentar el consumo dentro de la plataforma;
-* identificación de usuarios sensibles a promociones;
-* diferenciación entre usuarios nuevos, habituales y premium.
+### Perfil de usuario (`perfil_usuarios.csv`)
+Son los datos que vienen desde la base de datos de Postgres y nos dan el contexto de quién es el usuario:
+* **Edad:** Para segmentar por rango de edad.
+* **Dispositivos y uso de la app móvil:** Para saber si ven streaming en el teléfono, la tele o el computador.
+* **Perfiles creados:** Para identificar si la cuenta la usa una sola persona o una familia.
+* **Interacciones con soporte:** Cuántas veces han pedido ayuda por problemas técnicos.
+* **Distancia a la red:** Un dato técnico para evaluar si su conexión podría tener problemas de velocidad o latencia.
 
-La segmentación permite pasar de una estrategia general para todos los usuarios a una estrategia diferenciada según el comportamiento de cada grupo.
+---
 
-## 3. Fuentes de datos utilizadas
-
-El proyecto integra información desde dos fuentes principales.
-
-### Fuente 1: `usuarios_streaming.csv`
-
-Esta fuente contiene información relacionada con el consumo de los usuarios dentro de la plataforma.
-
-Incluye variables como:
-
-* horas de consumo mensual;
-* gasto mensual;
-* cantidad de contenidos vistos;
-* sesiones por semana;
-* porcentaje de finalización de contenidos;
-* tiempo promedio de sesión;
-* cantidad de géneros consumidos;
-* porcentaje de uso de promociones;
-* antigüedad del usuario.
-
-### Fuente 2: `perfil_usuarios.csv`
-
-Esta fuente contiene información complementaria del perfil del usuario. En el proyecto, esta información se considera como una fuente proveniente de una base de datos PostgreSQL.
-
-Incluye variables como:
-
-* edad;
-* dispositivos registrados;
-* porcentaje de uso desde aplicación móvil;
-* cantidad de perfiles creados;
-* interacciones mensuales con soporte;
-* distancia promedio asociada a la red de conexión.
-
-Ambas fuentes se integran mediante la columna `id_cliente`.
-
-## 4. Importancia de integrar las fuentes
-
-La integración de ambas fuentes permite construir una visión más completa de cada usuario.
-
-Si solo se analiza el consumo, se pueden observar patrones de uso, pero no necesariamente características asociadas al perfil del usuario. Por otro lado, si solo se analiza el perfil, se pierde información importante sobre el comportamiento real dentro de la plataforma.
-
-Al unir ambas fuentes, el modelo puede segmentar considerando tanto el comportamiento de consumo como las características complementarias del usuario.
-
-## 5. Enfoque analítico
-
-El proyecto utiliza aprendizaje no supervisado, específicamente el algoritmo KMeans, para identificar grupos de usuarios con comportamientos similares.
-
-Este enfoque es adecuado porque no existe una etiqueta previa que indique a qué tipo de segmento pertenece cada usuario. El modelo busca patrones en los datos y agrupa usuarios según similitudes entre sus variables.
-
-Antes de entrenar el modelo, se realiza una validación del pipeline ETL para revisar que los datos tengan columnas correctas, no presenten valores nulos, no tengan duplicados y puedan integrarse correctamente.
-
-## 6. Segmentos identificados
-
-A partir del análisis realizado, se trabaja con tres segmentos principales de usuarios.
-
-### Cluster 0: Usuarios habituales exploradores
-
-Este grupo está compuesto por usuarios con sesiones frecuentes, pero de menor duración. Presentan un consumo moderado y tienden a explorar distintos contenidos dentro de la plataforma.
-
-Desde el punto de vista del negocio, este segmento puede abordarse con recomendaciones personalizadas que incentiven una mayor duración de sesión y una mayor finalización de contenidos.
-
-### Cluster 1: Usuarios nuevos sensibles a precio
-
-Este grupo se caracteriza por usuarios con menor antigüedad, menor consumo y mayor uso de promociones.
-
-Desde el punto de vista del negocio, este segmento requiere estrategias de retención temprana. Algunas acciones posibles son beneficios de bienvenida, promociones controladas y recomendaciones iniciales para aumentar el hábito de consumo.
-
-### Cluster 2: Usuarios premium leales
-
-Este grupo presenta mayor gasto, alto porcentaje de finalización y menor sensibilidad a promociones.
-
-Desde el punto de vista del negocio, este segmento representa usuarios de alto valor. Para este grupo se recomienda aplicar estrategias de fidelización, contenido exclusivo, beneficios premium y experiencias personalizadas.
-
-## 7. Valor de negocio esperado
-
-La segmentación permite que la empresa tome decisiones más enfocadas según el tipo de usuario.
-
-Algunos beneficios esperados son:
-
-* mejorar la personalización de recomendaciones;
-* aumentar la retención de usuarios nuevos;
-* identificar usuarios de alto valor;
-* optimizar campañas promocionales;
-* evitar entregar descuentos innecesarios a usuarios que ya presentan alta lealtad;
-* apoyar decisiones de marketing, producto y experiencia de usuario.
-
-## 8. Conclusión del contexto
-
-El proyecto busca transformar datos dispersos de la plataforma en información útil para la toma de decisiones. Mediante la integración de fuentes, validación de datos, aplicación de KMeans y visualización en dashboard, la empresa puede comprender mejor a sus usuarios y diseñar estrategias diferenciadas para cada segmento.
+## 3. ¿Qué es lo que hace nuestra solución?
+Para cumplir con lo que pide el negocio, el proyecto se divide en tres partes:
+1. **Pipeline ETL:** Un script automático que lee Postgres y el CSV,valida la calidad de los datos detectando registros nulos y duplicados antes de consolidarlos, y los une de forma limpia en el archivo final `data/data_consolidada.csv`.
+2. **Modelo KMeans:** Tomamos las variables, las escalamos para que los rangos no alteren los resultados y entrenamos el modelo usando el método del codo y Silhouette. Así definimos que el número ideal son 3 grupos de usuarios.
+3. **Dashboard en Streamlit:** Una app interactiva con tres pestañas pensadas para distintas personas de la empresa: una vista rápida con gráficos de torta y negocio para los jefes (Vista Ejecutiva), una con las métricas del modelo (Vista Técnica) y otra para revisar las tablas a fondo (Vista Operativa).

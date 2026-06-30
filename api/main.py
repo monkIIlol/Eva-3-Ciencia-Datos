@@ -10,15 +10,30 @@ import json
 import pickle
 
 from fastapi import FastAPI
+import logging
+
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="API de Segmentación de Usuarios — Streaming")
 
 # Cargar al iniciar: los resultados que dejó el entrenamiento
-modelo = pickle.load(open("models/modelo_kmeans.pkl", "rb"))
-scaler = pickle.load(open("models/scaler.pkl", "rb"))
-
-with open("models/metricas.json") as f:
-    metricas = json.load(f)
+try:
+    modelo = pickle.load(open("models/modelo_kmeans.pkl", "rb"))
+    scaler = pickle.load(open("models/scaler.pkl", "rb"))
+    with open("models/metricas.json") as f:
+        metricas = json.load(f)
+    logger.info("Modelo, scaler y métricas cargados correctamente al iniciar la API.")
+except FileNotFoundError:
+    logger.exception(
+        "No se encontraron los artefactos del modelo en /models. "
+        "¿Se ejecutó model/train.py antes de levantar la API?"
+    )
+    raise
 
 
 @app.get("/")
@@ -31,9 +46,16 @@ def inicio():
 def dashboard_data():
     """Devuelve todo lo que el dashboard necesita para graficar:
     usuarios con su cluster asignado, centroides y métricas del modelo."""
-    usuarios = pd.read_csv("data/usuarios_segmentados.csv")
-    centroides = pd.read_csv("data/centroides.csv")
-    evaluacion_k = pd.read_csv("data/evaluacion_k.csv")
+    try:
+        usuarios = pd.read_csv("data/usuarios_segmentados.csv")
+        centroides = pd.read_csv("data/centroides.csv")
+        evaluacion_k = pd.read_csv("data/evaluacion_k.csv")
+    except FileNotFoundError as error:
+        logger.exception("Faltan archivos de resultados del modelo.")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Resultados del modelo no disponibles todavía: {error.filename}",
+        )
 
     return {
         "usuarios": usuarios.to_dict(orient="records"),
@@ -47,8 +69,16 @@ def dashboard_data():
 def predict(datos: dict):
     """Clasifica un usuario nuevo: recibe sus variables y devuelve
     a qué cluster pertenece, según el modelo ya entrenado."""
-    fila = pd.DataFrame([datos])
-    X = scaler.transform(fila)
-    cluster = modelo.predict(X)
+    try:
+        fila = pd.DataFrame([datos])
+        X = scaler.transform(fila)
+    except (KeyError, ValueError) as error:
+        logger.warning("Datos de entrada inválidos en /predict: %s", error)
+        raise HTTPException(
+            status_code=422,
+            detail=f"Datos de entrada inválidos o incompletos: {error}",
+        )
 
+    cluster = modelo.predict(X)
+    logger.info("Predicción generada: cluster=%s", int(cluster[0]))
     return {"cluster": int(cluster[0])}

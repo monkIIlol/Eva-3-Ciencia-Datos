@@ -1,74 +1,59 @@
-# Arquitectura del sistema
+# Arquitectura del Sistema
 
-## Diagrama de flujo de datos
+## Diagrama de Flujo de Datos e Integración
+┌──────────────────────────┐                                    ┌────────────────────────────┐
 
-```
-┌──────────────────────────┐                                    ┌────────────────────────────┐    
-│  usuarios_streaming.csv  │                                    │   perfil_usuarios.csv      │   
-│  (archivo plano)         │                                    │   → cargado en Postgres    │
-└────────────┬─────────────┘                                    └─────────────┬──────────────┘    
-             │                                                                │
-             └──────────────────┬─────────────────────────────┬───────────────┘
-                                ▼                             ▼
-                       ┌─────────────────────────────────────────────┐
-                       │           etl/extract.py                    │
-                       │  extract_usuarios_streaming()               │
-                       │  extract_perfil_usuarios()                  │
-                       │  extract_api_source()                       │
-                       └─────────────────────┬───────────────────────┘
-                                             ▼
-                       ┌─────────────────────────────────────────────┐
-                       │           etl/validate.py                   │
-                       │  Esquemas pandera: tipos, rangos,           │
-                       │  nulabilidad, unicidad                      │
-                       └─────────────────────┬───────────────────────┘
-                                             ▼
-                       ┌─────────────────────────────────────────────┐
-                       │           etl/transform.py                  │
-                       │  merge_sources() → check_duplicates()       │
-                       │  → select_model_features()                  │
-                       └─────────────────────┬───────────────────────┘
-                                             ▼
-                       ┌─────────────────────────────────────────────┐
-                       │           etl/load.py                       │
-                       │  Guarda dataset_consolidado.csv             │
-                       │  en data/processed/                         │
-                       └─────────────────────┬───────────────────────┘
-                                             ▼
-                       ┌─────────────────────────────────────────────┐
-                       │       model/train_kmeans.py                 │
-                       │  scale_features() → find_optimal_k()        │
-                       │  (KneeLocator + silhouette) → train_kmeans()│
-                       └─────────────────────┬───────────────────────┘
-                                             ▼
-                       ┌─────────────────────────────────────────────┐
-                       │      model/segment_profile.py               │
-                       │  assign_clusters() → profile_segments()     │
-                       │  + interpretación de negocio                │
-                       └─────────────────────┬───────────────────────┘
-                                             ▼
-                       ┌─────────────────────────────────────────────┐
-                       │          dashboard/app.py                   │
-                       │  Streamlit: visión general, perfilamiento,  │
-                       │  comparación, filtros interactivos          │
-                       └─────────────────────────────────────────────┘
-```
+│  usuarios_streaming.csv  │                                    │   perfil_usuarios (DB)     │
 
-## Contenedores (Docker Compose)
+│  (Archivo plano local)   │                                    │   → Guardado en Postgres   │
+└────────────┬─────────────┘                                    └─────────────┬──────────────┘
 
-| Servicio | Imagen base | Puerto | Rol |
+│                                                                │
+└──────────────────┬─────────────────────────────┬───────────────┘
+▼                             ▼
+┌─────────────────────────────────────────────┐
+│               etl/extract.py                │
+│ - extract_csv()                             │
+│ - extraer_postgres() (id_cliente join)      │
+└─────────────────────┬───────────────────────└
+▼
+┌─────────────────────────────────────────────┐
+│               etl/validate.py               │
+│ - Validación de rangos, nulos y unicidad    │
+└─────────────────────┬───────────────────────└
+▼
+┌─────────────────────────────────────────────┐
+│               model/train.py                │
+│ - StandardScaler / Pipeline                 │
+│ - Búsqueda de K óptimo (Codo + Silhouette)  │
+│ - Entrenamiento KMeans (k=3) y guardado     │
+└─────────────────────┬───────────────────────└
+▼
+┌─────────────────────────────────────────────┐
+│               api/main.py (FastAPI)         │
+│ - Expone puerto 8000                        │
+│ - Endpoint: /dashboard-data                 │
+└─────────────────────┬───────────────────────└
+▼ (Consumo vía HTTP)
+┌─────────────────────────────────────────────┐
+│             dashboards/app.py               │
+│ - Streamlit (Puerto 8501)                   │
+│ - Control de espera / Reintentos activos    │
+└─────────────────────────────────────────────┘
+## Orquestación de Contenedores (Docker Compose)
+
+El entorno completo se levanta de forma aislada y segura utilizando las variables de entorno definidas en el archivo `.env`:
+
+| Servicio | Imagen Base | Puerto Externo | Rol dentro del Sistema |
 |---|---|---|---|
-| `postgres` | `postgres:16-alpine` | 5432 | Almacena `perfil_usuarios` |
-| `etl` | `python:3.11-slim` | — | Ejecuta el pipeline completo y termina |
-| `dashboard` | `python:3.11-slim` + Streamlit | 8501 | Expone el dashboard interactivo |
+| `postgres` | `postgres:16-alpine` | `5432` | Base de datos relacional que aloja la tabla `perfil_usuarios`. |
+| `api` | `python:3.11-slim` | `8000` | Contenedor crítico. Ejecuta secuencialmente el pipeline ETL (`extract.py`), entrena el modelo KMeans (`train.py`) y activa el servidor FastAPI para servir los datos estructurados. |
+| `dashboard` | `python:3.11-slim` | `8501` | Aplicación web interactiva en Streamlit organizada por pestañas de audiencia (Ejecutiva, Técnica y Operativa). Consume los datos mediante peticiones HTTP internas. |
 
-El servicio `etl` depende de que `postgres` esté saludable (`healthcheck`)
-y de que `api` esté disponible antes de ejecutarse. El `dashboard` depende
-de que `etl` haya corrido al menos una vez (para tener datos en
-`data/processed/`).
+### Sincronización y Dependencias:
+* `api` espera a que `postgres` esté completamente levantado y respondiendo peticiones antes de iniciar el procesamiento ETL.
+* `dashboard` incorpora un bucle de reintento automatizado (`time.sleep`) para esperar activamente a que el contenedor `api` termine de procesar las operaciones de ciencia de datos antes de pintar los gráficos en pantalla.
 
 ## Decisiones de diseño relevantes
 
-Ver [`decisiones_diseno.md`](decisiones_diseno.md) para la justificación
-detallada de cada elección (estructura de carpetas, estrategia de join,
-selección de k, uso de PCA, herramienta de dashboard, etc.).
+Ver [`decisiones_diseno.md`](decisiones_diseno.md) para la justificación detallada de cada elección técnica (estructura limpia de carpetas, escalamiento de datos, selección analítica de $k=3$ y la distribución de gráficos por audiencias)

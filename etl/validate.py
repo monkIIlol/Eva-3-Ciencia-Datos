@@ -12,6 +12,15 @@ Este script revisa:
 
 import pandas as pd
 from pathlib import Path
+import os
+import logging
+
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
 
 
 COLUMNAS_STREAMING = [
@@ -55,7 +64,7 @@ def validar_columnas(df, columnas_esperadas, nombre_fuente):
             f"La fuente {nombre_fuente} no tiene estas columnas: {columnas_faltantes}"
         )
 
-    print(f"[OK] {nombre_fuente}: columnas esperadas encontradas.")
+    logger.info(f"[OK] {nombre_fuente}: columnas esperadas encontradas.")
 
 
 def validar_nulos(df, nombre_fuente):
@@ -67,7 +76,7 @@ def validar_nulos(df, nombre_fuente):
             f"La fuente {nombre_fuente} tiene valores nulos:\n{columnas_con_nulos}"
         )
 
-    print(f"[OK] {nombre_fuente}: no contiene valores nulos.")
+    logger.info(f"[OK] {nombre_fuente}: no contiene valores nulos.")
 
 
 def validar_duplicados_id(df, nombre_fuente):
@@ -78,7 +87,7 @@ def validar_duplicados_id(df, nombre_fuente):
             f"La fuente {nombre_fuente} tiene {duplicados} id_cliente duplicados."
         )
 
-    print(f"[OK] {nombre_fuente}: no tiene id_cliente duplicados.")
+    logger.info(f"[OK] {nombre_fuente}: no tiene id_cliente duplicados.")
 
 
 def validar_tipos_numericos(df, columnas_esperadas, nombre_fuente):
@@ -88,7 +97,7 @@ def validar_tipos_numericos(df, columnas_esperadas, nombre_fuente):
                 f"La columna {columna} de {nombre_fuente} no es numérica."
             )
 
-    print(f"[OK] {nombre_fuente}: todas las columnas esperadas son numéricas.")
+    logger.info(f"[OK] {nombre_fuente}: todas las columnas esperadas son numéricas.")
 
 
 def validar_integracion(df_streaming, df_perfil):
@@ -108,11 +117,11 @@ def validar_integracion(df_streaming, df_perfil):
             "Existen id_cliente en perfil_usuarios.csv que no están en usuarios_streaming.csv."
         )
 
-    print("[OK] Integración: los id_cliente coinciden entre ambas fuentes.")
+    logger.info("[OK] Integración: los id_cliente coinciden entre ambas fuentes.")
 
 
 def ejecutar_validaciones():
-    print("Iniciando validación del pipeline ETL...\n")
+    logger.info("Iniciando validación del pipeline ETL...\n")
 
     df_streaming = cargar_csv("data/usuarios_streaming.csv")
     df_perfil = cargar_csv("database/perfil_usuarios.csv")
@@ -133,9 +142,9 @@ def ejecutar_validaciones():
 
     df_integrado = df_streaming.merge(df_perfil, on="id_cliente", how="inner")
 
-    print("\n[OK] Dataset integrado validado correctamente.")
-    print(f"Filas finales: {df_integrado.shape[0]}")
-    print(f"Columnas finales: {df_integrado.shape[1]}")
+    logger.info("\n[OK] Dataset integrado validado correctamente.")
+    logger.info(f"Filas finales: {df_integrado.shape[0]}")
+    logger.info(f"Columnas finales: {df_integrado.shape[1]}")
 
     return df_integrado
 

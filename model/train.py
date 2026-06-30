@@ -18,6 +18,14 @@ from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 from kneed import KneeLocator
 from sklearn.decomposition import PCA
+import logging
+
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
 
 os.makedirs("models", exist_ok=True)
 
@@ -56,7 +64,7 @@ k_optimo = kl.elbow
 kmeans = KMeans(n_clusters=k_optimo, random_state=29, n_init=10)
 clusters = kmeans.fit_predict(X_scaled)
 data["cluster"] = clusters
-print(f"Modelo entrenado con k={k_optimo}")
+logger.info("Modelo entrenado con k=%s", k_optimo)
 
 # 7. PCA a 2 componentes, solo para visualización
 pca = PCA(n_components=2)
@@ -88,4 +96,4 @@ pickle.dump(kmeans, open("models/modelo_kmeans.pkl", "wb"))
 pickle.dump(scaler, open("models/scaler.pkl", "wb"))
 pickle.dump(pca, open("models/pca.pkl", "wb"))
 
-print("Modelo, métricas y centroides guardados")
+logger.info("Modelo, métricas y centroides guardados")

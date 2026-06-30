@@ -9,25 +9,33 @@ Ambas se unen por id_cliente para formar el dataset consolidado.
 import os
 import pandas as pd
 from sqlalchemy import create_engine
+import logging
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
 
 
 def extraer_csv(ruta="data/usuarios_streaming.csv"):
     """Lee la fuente 1: el CSV de consumo de streaming."""
-    df = pd.read_csv(ruta)
-    print(f"CSV leído: {df.shape[0]} filas, {df.shape[1]} columnas")
+    try:
+        df = pd.read_csv(ruta)
+    except FileNotFoundError:
+        logger.error("No se encontró el archivo CSV en %s", ruta)
+        raise
+    except pd.errors.EmptyDataError:
+        logger.error("El archivo CSV en %s está vacío", ruta)
+        raise
+
+    logger.info("CSV leído: %s filas, %s columnas", df.shape[0], df.shape[1])
     return df
 
 
 def extraer_postgres():
     """Lee la fuente 2: la tabla perfil_usuarios desde Postgres."""
-    usuario = os.getenv("POSTGRES_USER")
-    password = os.getenv("POSTGRES_PASSWORD")
-    host = os.getenv("POSTGRES_HOST")
-    puerto = os.getenv("POSTGRES_PORT")
-    base_datos = os.getenv("POSTGRES_DB")
-
-    url = f"postgresql://{usuario}:{password}@{host}:{puerto}/{base_datos}"
-    engine = create_engine(url)
+    engine = create_engine("postgresql://admin:admin@postgres:5432/streaming_db")
     df = pd.read_sql("SELECT * FROM perfil_usuarios", engine)
     print(f"Postgres leído: {df.shape[0]} filas, {df.shape[1]} columnas")
     return df
@@ -36,7 +44,7 @@ def extraer_postgres():
 def integrar(df_streaming, df_perfil):
     """Une las dos fuentes por id_cliente."""
     data = df_streaming.merge(df_perfil, on="id_cliente")
-    print(f"Datos integrados: {data.shape[0]} filas, {data.shape[1]} columnas")
+    logger.info("Datos integrados: %s filas, %s columnas", data.shape[0], data.shape[1])
     return data
 
 
@@ -48,4 +56,4 @@ if __name__ == "__main__":
 
     # Guardar el dataset consolidado para que el modelo lo use
     data.to_csv("data/data_consolidada.csv", index=False)
-    print("Dataset consolidado guardado en data/data_consolidada.csv")
+    logger.info("Dataset consolidado guardado en data/data_consolidada.csv")

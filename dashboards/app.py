@@ -161,6 +161,31 @@ with tab_tecnica:
         "Se confirma cruzándolo con el punto de mayor Silhouette."
     )
 
+    st.subheader("Proyección PCA de los segmentos")
+
+    fig_pca = px.scatter(
+        df,
+        x="pc1",
+        y="pc2",
+        color=df["cluster"].astype(str),
+        hover_data=["id_cliente"],
+        labels={"color": "Cluster", "pc1": "PC1", "pc2": "PC2"},
+        title="Segmentos proyectados en 2 componentes principales",
+    )
+
+    # Marcar los centroides como puntos grandes con X
+    centroides_pca = df.groupby("cluster")[["pc1", "pc2"]].mean()
+    fig_pca.add_trace(go.Scatter(
+        x=centroides_pca["pc1"],
+        y=centroides_pca["pc2"],
+        mode="markers",
+        marker=dict(size=18, symbol="x", color="red", line=dict(width=2)),
+        name="Centroides",
+        showlegend=True,
+    ))
+
+    st.plotly_chart(fig_pca, use_container_width=True)
+
 # ============================================================
 # VISTA OPERATIVA
 # ============================================================

@@ -135,6 +135,19 @@ with tab_ejecutiva:
 with tab_tecnica:
     st.subheader("Selección del número de clusters (k)")
 
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Silhouette Score", f"{metricas['silhouette_score']:.3f}")
+    with col2:
+        st.metric("K óptimo", metricas["k_optimo"])
+    with col3:
+        st.metric("Varianza explicada (PCA)", f"{metricas['varianza_pca'] * 100:.1f}%")
+
+    st.caption(
+        "El Silhouette se calcula sobre las 15 variables escaladas, no sobre los "
+        "componentes de PCA. PCA se usa únicamente para visualización."
+    )
+    
     fig_codo = go.Figure()
     fig_codo.add_trace(go.Scatter(
         x=evaluacion_k["k"], y=evaluacion_k["inertia"],

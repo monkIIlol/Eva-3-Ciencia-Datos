@@ -57,6 +57,23 @@ COLUMNAS_NUMERICAS_ESPERADAS = [
 ]
 
 
+COLUMNAS_IMPUTABLES = [
+    columna for columna in COLUMNAS_NUMERICAS_ESPERADAS
+    if columna != "id_cliente"
+]
+
+
+COLUMNAS_OUTLIERS_IQR = [
+    "horas_consumo_mensual",
+    "gasto_mensual",
+    "cantidad_contenidos_vistos",
+    "sesiones_semana",
+    "tiempo_promedio_sesion_min",
+    "antiguedad_cliente_meses",
+    "distancia_promedio_red_km",
+]
+
+
 def cargar_dataset(ruta: Path = RUTA_ENTRADA) -> pd.DataFrame:
     """Carga el dataset consolidado generado por el proceso ETL."""
     if not ruta.exists():
@@ -65,7 +82,11 @@ def cargar_dataset(ruta: Path = RUTA_ENTRADA) -> pd.DataFrame:
         )
 
     df = pd.read_csv(ruta)
-    logger.info("Dataset consolidado cargado: %s filas, %s columnas", df.shape[0], df.shape[1])
+    logger.info(
+        "Dataset consolidado cargado: %s filas, %s columnas",
+        df.shape[0],
+        df.shape[1],
+    )
     return df
 
 
@@ -77,48 +98,130 @@ def validar_columnas_base(df: pd.DataFrame) -> None:
         raise ValueError(f"Faltan columnas requeridas para modelado: {faltantes}")
 
 
+def tratar_outliers_iqr(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Trata valores atípicos mediante el método IQR.
+
+    En vez de eliminar registros, aplica winsorización con clip para conservar
+    la cantidad de filas y reducir el impacto de valores extremos.
+    """
+    df = df.copy()
+    reporte_outliers = {}
+
+    for columna in COLUMNAS_OUTLIERS_IQR:
+        q1 = df[columna].quantile(0.25)
+        q3 = df[columna].quantile(0.75)
+        iqr = q3 - q1
+
+        if pd.isna(iqr) or iqr == 0:
+            reporte_outliers[columna] = {
+                "outliers_detectados": 0,
+                "limite_inferior": None,
+                "limite_superior": None,
+            }
+            continue
+
+        limite_inferior = max(0, q1 - 1.5 * iqr)
+        limite_superior = q3 + 1.5 * iqr
+
+        outliers_detectados = int(
+            ((df[columna] < limite_inferior) | (df[columna] > limite_superior)).sum()
+        )
+
+        df[columna] = df[columna].clip(
+            lower=limite_inferior,
+            upper=limite_superior,
+        )
+
+        reporte_outliers[columna] = {
+            "outliers_detectados": outliers_detectados,
+            "limite_inferior": round(float(limite_inferior), 4),
+            "limite_superior": round(float(limite_superior), 4),
+        }
+
+    df.attrs["outliers_iqr"] = reporte_outliers
+    return df
+
+
 def limpiar_dataset(df: pd.DataFrame) -> pd.DataFrame:
     """
     Limpia el dataset base.
 
-    Acciones:
-    - elimina duplicados por id_cliente;
-    - convierte columnas esperadas a numéricas;
-    - imputa nulos numéricos con mediana;
-    - reemplaza infinitos;
-    - corrige rangos mínimos para evitar divisiones por cero.
+    Reglas principales:
+    - id_cliente no se imputa, porque es un identificador.
+    - Se eliminan registros sin id_cliente.
+    - Se eliminan duplicados por id_cliente.
+    - Se imputan variables numéricas con mediana.
+    - Se corrigen rangos de negocio.
+    - Se tratan outliers mediante IQR.
     """
     df = df.copy()
 
     filas_iniciales = len(df)
-    df = df.drop_duplicates(subset=["id_cliente"])
-    duplicados_eliminados = filas_iniciales - len(df)
 
-    for columna in COLUMNAS_NUMERICAS_ESPERADAS:
+    # El ID se trata como identificador, no como variable imputable.
+    df["id_cliente"] = pd.to_numeric(df["id_cliente"], errors="coerce")
+    ids_nulos_eliminados = int(df["id_cliente"].isna().sum())
+    df = df.dropna(subset=["id_cliente"])
+    df["id_cliente"] = df["id_cliente"].astype(int)
+
+    filas_despues_ids = len(df)
+    df = df.drop_duplicates(subset=["id_cliente"], keep="first")
+    duplicados_eliminados = filas_despues_ids - len(df)
+
+    for columna in COLUMNAS_IMPUTABLES:
         df[columna] = pd.to_numeric(df[columna], errors="coerce")
 
     df = df.replace([np.inf, -np.inf], np.nan)
 
-    nulos_antes = df[COLUMNAS_NUMERICAS_ESPERADAS].isna().sum().to_dict()
+    nulos_antes = df[COLUMNAS_NUMERICAS_ESPERADAS].isna().sum().astype(int).to_dict()
 
-    for columna in COLUMNAS_NUMERICAS_ESPERADAS:
+    for columna in COLUMNAS_IMPUTABLES:
         if df[columna].isna().any():
-            df[columna] = df[columna].fillna(df[columna].median())
+            mediana = df[columna].median()
 
-    # Reglas de consistencia para evitar valores inválidos en divisiones.
+            if pd.isna(mediana):
+                mediana = 0
+
+            df[columna] = df[columna].fillna(mediana)
+
+    # Reglas de consistencia y rangos de negocio.
     df["sesiones_semana"] = df["sesiones_semana"].clip(lower=1)
     df["horas_consumo_mensual"] = df["horas_consumo_mensual"].clip(lower=0.1)
-    df["dispositivos_registrados"] = df["dispositivos_registrados"].clip(lower=1)
+    df["gasto_mensual"] = df["gasto_mensual"].clip(lower=0)
     df["cantidad_contenidos_vistos"] = df["cantidad_contenidos_vistos"].clip(lower=0)
+    df["tiempo_promedio_sesion_min"] = df["tiempo_promedio_sesion_min"].clip(lower=0)
+    df["cantidad_generos_consumidos"] = df["cantidad_generos_consumidos"].clip(lower=0)
+    df["antiguedad_cliente_meses"] = df["antiguedad_cliente_meses"].clip(lower=0)
+    df["edad"] = df["edad"].clip(lower=13, upper=100)
+    df["dispositivos_registrados"] = df["dispositivos_registrados"].clip(lower=1)
+    df["cantidad_perfiles_creados"] = df["cantidad_perfiles_creados"].clip(lower=1)
+    df["interacciones_mensuales_soporte"] = df["interacciones_mensuales_soporte"].clip(lower=0)
+    df["distancia_promedio_red_km"] = df["distancia_promedio_red_km"].clip(lower=0)
+
     df["porcentaje_finalizacion"] = df["porcentaje_finalizacion"].clip(lower=0, upper=100)
     df["porcentaje_uso_promociones"] = df["porcentaje_uso_promociones"].clip(lower=0, upper=1)
     df["porcentaje_uso_app_movil"] = df["porcentaje_uso_app_movil"].clip(lower=0, upper=1)
-    df["edad"] = df["edad"].clip(lower=13, upper=100)
 
-    df.attrs["duplicados_eliminados"] = duplicados_eliminados
+    df = tratar_outliers_iqr(df)
+
+    if df["id_cliente"].isna().any():
+        raise ValueError("id_cliente contiene valores nulos después de la limpieza.")
+
+    if df["id_cliente"].duplicated().any():
+        raise ValueError("id_cliente contiene duplicados después de la limpieza.")
+
+    df.attrs["filas_iniciales"] = int(filas_iniciales)
+    df.attrs["ids_nulos_eliminados"] = int(ids_nulos_eliminados)
+    df.attrs["duplicados_eliminados"] = int(duplicados_eliminados)
     df.attrs["nulos_antes"] = nulos_antes
 
-    logger.info("Limpieza completada. Duplicados eliminados: %s", duplicados_eliminados)
+    logger.info(
+        "Limpieza completada. IDs nulos eliminados: %s | Duplicados eliminados: %s",
+        ids_nulos_eliminados,
+        duplicados_eliminados,
+    )
+
     return df
 
 
@@ -131,9 +234,12 @@ def crear_variables_derivadas(df: pd.DataFrame) -> pd.DataFrame:
     """
     df = df.copy()
 
-    # Feature engineering vectorizado con Pandas / NumPy.
+    # Se estima el total mensual de sesiones para no mezclar una variable mensual
+    # con una variable semanal.
+    df["sesiones_mes_estimadas"] = df["sesiones_semana"] * 4
+
     df["contenidos_por_sesion"] = (
-        df["cantidad_contenidos_vistos"] / df["sesiones_semana"]
+        df["cantidad_contenidos_vistos"] / df["sesiones_mes_estimadas"]
     ).round(3)
 
     df["gasto_por_hora"] = (
@@ -154,9 +260,8 @@ def crear_variables_derivadas(df: pd.DataFrame) -> pd.DataFrame:
         0,
     ).round(3)
 
-    # Indicador de engagement: combina consumo, sesiones, finalización y antigüedad.
-    # Se usan rankings percentiles para que las variables queden comparables sin depender
-    # de magnitudes originales.
+    # Indicador descriptivo relativo.
+    # Usa rankings percentiles para combinar variables con distintas escalas.
     df["engagement_score"] = (
         df["horas_consumo_mensual"].rank(pct=True) * 0.30
         + df["sesiones_semana"].rank(pct=True) * 0.25
@@ -173,7 +278,6 @@ def crear_variables_derivadas(df: pd.DataFrame) -> pd.DataFrame:
     df["cliente_antiguo"] = np.where(df["antiguedad_cliente_meses"] >= 36, 1, 0)
     df["uso_promociones_alto"] = np.where(df["porcentaje_uso_promociones"] >= 0.50, 1, 0)
 
-    # Variable proxy útil para análisis de negocio.
     df["valor_cliente"] = np.select(
         [
             (df["gasto_mensual"] >= df["gasto_mensual"].quantile(0.75))
@@ -199,11 +303,8 @@ def optimizar_tipos(df: pd.DataFrame) -> pd.DataFrame:
 
     columnas_enteras = [
         "id_cliente",
-        "horas_consumo_mensual",
-        "gasto_mensual",
         "cantidad_contenidos_vistos",
         "sesiones_semana",
-        "porcentaje_finalizacion",
         "tiempo_promedio_sesion_min",
         "cantidad_generos_consumidos",
         "antiguedad_cliente_meses",
@@ -213,6 +314,7 @@ def optimizar_tipos(df: pd.DataFrame) -> pd.DataFrame:
         "interacciones_mensuales_soporte",
         "cliente_antiguo",
         "uso_promociones_alto",
+        "sesiones_mes_estimadas",
     ]
 
     for columna in columnas_enteras:
@@ -270,12 +372,15 @@ def generar_reporte_calidad(df_original: pd.DataFrame, df_final: pd.DataFrame) -
         "columnas_originales": int(df_original.shape[1]),
         "filas_finales": int(df_final.shape[0]),
         "columnas_finales": int(df_final.shape[1]),
+        "ids_nulos_eliminados": int(df_final.attrs.get("ids_nulos_eliminados", 0)),
         "duplicados_eliminados": int(df_final.attrs.get("duplicados_eliminados", 0)),
         "nulos_antes_limpieza": df_final.attrs.get("nulos_antes", {}),
         "nulos_finales": df_final.isna().sum().astype(int).to_dict(),
+        "outliers_iqr": df_final.attrs.get("outliers_iqr", {}),
         "memoria_original_mb": round(float(memoria_original_mb), 4),
         "memoria_final_mb": round(float(memoria_final_mb), 4),
         "variables_derivadas": [
+            "sesiones_mes_estimadas",
             "contenidos_por_sesion",
             "gasto_por_hora",
             "minutos_totales_estimados",
@@ -287,6 +392,10 @@ def generar_reporte_calidad(df_original: pd.DataFrame, df_final: pd.DataFrame) -
             "uso_promociones_alto",
             "valor_cliente",
         ],
+        "nota_metodologica": (
+            "id_cliente se trata como identificador y no se imputa. "
+            "Los outliers se tratan mediante IQR con winsorización para conservar registros."
+        ),
     }
 
     return reporte
@@ -301,9 +410,9 @@ def preparar_dataset() -> pd.DataFrame:
     df_preparado = crear_variables_derivadas(df_limpio)
     df_preparado = optimizar_tipos(df_preparado)
 
-    # Mantener atributos para el reporte después de optimizar tipos.
-    df_preparado.attrs["duplicados_eliminados"] = df_limpio.attrs.get("duplicados_eliminados", 0)
-    df_preparado.attrs["nulos_antes"] = df_limpio.attrs.get("nulos_antes", {})
+    # Mantener atributos para el reporte después de copiar/optimizar el DataFrame.
+    for clave, valor in df_limpio.attrs.items():
+        df_preparado.attrs[clave] = valor
 
     kpis = generar_kpis_negocio(df_preparado)
     reporte = generar_reporte_calidad(df_original, df_preparado)

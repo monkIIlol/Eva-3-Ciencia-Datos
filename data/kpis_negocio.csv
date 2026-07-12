@@ -1,7 +1,7 @@
 nivel_engagement,valor_cliente,usuarios,gasto_promedio,consumo_promedio_horas,finalizacion_promedio,promociones_promedio,antiguedad_promedio,porcentaje_usuarios
-alto,alto_valor,41,448.88,50.24,85.95,0.1,73.98,13.67
+alto,alto_valor,41,448.46,50.24,85.95,0.1,73.98,13.67
 alto,valor_medio,23,225.74,42.87,80.74,0.22,58.61,7.67
 bajo,valor_en_riesgo,62,79.74,28.35,32.63,0.53,13.74,20.67
-medio,alto_valor,25,434.84,39.04,78.92,0.12,65.96,8.33
+medio,alto_valor,25,433.5,39.04,78.92,0.12,65.96,8.33
 medio,valor_en_riesgo,52,98.69,38.98,45.58,0.46,19.08,17.33
 medio,valor_medio,97,216.58,30.37,67.19,0.31,42.26,32.33

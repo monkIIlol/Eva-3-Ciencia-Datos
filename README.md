@@ -1,151 +1,467 @@
-# Segmentación de Usuarios de Streaming
+# Analítica y Segmentación de Usuarios de Streaming
 
-Proyecto E3 — SCY1101 Programación para la Ciencia de Datos
+Proyecto de Ciencia de Datos — SCY1101 Programación para la Ciencia de Datos
 
-Pipeline end-to-end que integra datos de consumo y perfil de usuarios de una
-plataforma de streaming, construye un modelo de segmentación con KMeans y
-expone los resultados en un dashboard interactivo.
+Solución de analítica de clientes para una plataforma de streaming. El proyecto integra datos de consumo y perfil de usuarios, aplica validación y preparación de datos, entrena modelos no supervisados y supervisados, expone resultados mediante una API REST y los presenta en un dashboard interactivo.
+
+El repositorio fue desarrollado originalmente para la Evaluación 3 y actualmente constituye la base técnica para la Evaluación Final Transversal.
 
 ## Integrantes
 
-- Verónica Cereceda
-- Diego Torres
-- Cristian Urcullú
+* Verónica Cereceda
+* Diego Torres
+* Cristian Urcullú
 
 ## Contexto del problema
 
-Ver [`docs/contexto_negocio.md`](docs/contexto_negocio.md) para el detalle completo
-del caso de negocio y las fuentes de datos.
+El negocio utiliza actualmente estrategias generales para todos sus usuarios, sin diferenciar sus comportamientos, niveles de consumo o características de perfil.
 
-En resumen: se busca identificar segmentos de usuarios con comportamientos
-similares (consumo, gasto, antigüedad, uso de promociones, etc.) para diseñar
-estrategias diferenciadas de retención y recomendación.
+La solución busca apoyar la personalización de campañas, recomendaciones y estrategias de retención mediante tres componentes analíticos:
 
-## Arquitectura
+* segmentación de usuarios mediante KMeans;
+* estimación del gasto mensual mediante modelos de regresión;
+* identificación de perfiles de bajo compromiso mediante modelos de clasificación.
 
+El detalle del caso de negocio y las fuentes de datos se encuentra en [`docs/contexto_negocio.md`](docs/contexto_negocio.md).
+
+## Fuentes de datos
+
+El proyecto utiliza dos fuentes principales:
+
+1. `data/usuarios_streaming.csv`: información de consumo y comportamiento en la plataforma.
+2. PostgreSQL: información de perfil de los usuarios, cargada desde `database/perfil_usuarios.csv`.
+
+Ambas fuentes se integran mediante `id_cliente`.
+
+## Arquitectura actual
+
+```text
+usuarios_streaming.csv ───────────────┐
+                                      │
+perfil_usuarios.csv → PostgreSQL ─────┤
+                                      ▼
+                              etl/extract.py
+                                      │
+                                      ▼
+                         data/data_consolidada.csv
+                                      │
+              ┌───────────────────────┼────────────────────────┐
+              │                       │                        │
+              ▼                       ▼                        ▼
+       etl/validate.py       etl/prepare_dataset.py       model/train.py
+              │                       │                        │
+              │                       ├─ dataset_modelo.csv    ├─ KMeans
+              │                       ├─ kpis_negocio.csv      ├─ PCA
+              │                       └─ reporte_calidad.json  └─ métricas
+              │
+              └───────────────────────┐
+                                      │
+                                      ▼
+                         model/train_supervisado.py
+                                      │
+                       ┌──────────────┴──────────────┐
+                       ▼                             ▼
+                   Regresión                     Clasificación
+                de gasto mensual             de bajo compromiso
+                       │                             │
+                       └──────────────┬──────────────┘
+                                      ▼
+                                 API FastAPI
+                                      │
+                                      ▼
+                              Dashboard Streamlit
 ```
-usuarios_streaming.csv ─┐
-perfil_usuarios.csv → Postgres ─┼─→ etl/extract.py (extraer + integrar)
-                                                     │
-                                                     ▼
-                                       dataset consolidado de usuarios
-                                                     │
-                                                     ▼
-                              escalamiento → KMeans (k óptimo vía codo + silhouette)
-                                                     │
-                                                     ▼
-                                    dashboard interactivo (Streamlit)
-```
 
-Diagrama completo en [`docs/arquitectura.md`](docs/arquitectura.md).
+La validación, preparación y entrenamiento se encuentran implementados como módulos separados. La integración de todas las etapas dentro de un único orquestador end-to-end se encuentra en desarrollo.
+
+El diagrama técnico se encuentra en [`docs/arquitectura.md`](docs/arquitectura.md).
+
+## Componentes analíticos
+
+### Segmentación no supervisada
+
+El modelo KMeans agrupa usuarios con comportamientos similares utilizando variables de consumo y perfil.
+
+La cantidad de clusters se evalúa mediante:
+
+* método del codo;
+* coeficiente Silhouette;
+* interpretación de negocio;
+* visualización con PCA.
+
+### Regresión
+
+Se comparan modelos para estimar el gasto mensual de un usuario:
+
+* regresión lineal;
+* Random Forest Regressor.
+
+La evaluación considera:
+
+* MAE;
+* RMSE;
+* R².
+
+### Clasificación
+
+Se comparan modelos para identificar perfiles de bajo compromiso:
+
+* regresión logística;
+* Random Forest Classifier.
+
+La evaluación considera:
+
+* accuracy;
+* precision;
+* recall;
+* F1-score;
+* ROC-AUC.
+
+La variable de clasificación representa una etiqueta proxy de bajo compromiso construida a partir del comportamiento de los usuarios. No corresponde a una variable observada de abandono o cancelación real.
+
+## Preparación de datos
+
+El módulo `etl/prepare_dataset.py` realiza:
+
+* eliminación de duplicados;
+* conversión de columnas numéricas;
+* tratamiento de valores nulos e infinitos;
+* validación y corrección de algunos rangos;
+* creación de variables derivadas;
+* optimización de tipos de datos;
+* generación de KPIs;
+* generación de un reporte de calidad.
+
+Artefactos generados:
+
+```text
+data/dataset_modelo.csv
+data/kpis_negocio.csv
+data/reporte_calidad.json
+```
 
 ## Estructura del repositorio
 
-```
+```text
 .
-├── etl/            # Pipeline de extracción, validación e integración de fuentes
-├── model/          # Entrenamiento de KMeans, selección de k, perfilamiento de clusters
-├── api/            # API REST que expone el modelo entrenado (FastAPI)
-├── dashboards/     # Dashboard interactivo
-├── tests/          # Pruebas automatizadas
-├── docker/         # Dockerfiles
-├── database/       # init.sql y carga de perfil_usuarios en Postgres
-├── docs/           # Documentación técnica y de negocio
-└── data/
+├── .github/
+│   └── workflows/           # Integración continua con GitHub Actions
+├── api/                     # API REST desarrollada con FastAPI
+├── dashboards/              # Dashboard interactivo desarrollado con Streamlit
+├── database/                # Inicialización y carga de PostgreSQL
+├── data/                    # Fuentes, datasets procesados y resultados
+├── docker/                  # Dockerfiles de la API y el dashboard
+├── docs/                    # Documentación técnica y de negocio
+├── etl/                     # Extracción, validación y preparación de datos
+├── model/                   # Modelos no supervisados y supervisados
+├── models/                  # Artefactos serializados de los modelos
+├── tests/                   # Pruebas automatizadas
+├── docker-compose.yml
+├── requirements.txt
+├── requirements-dev.txt
+└── README.md
 ```
 
-## Cómo correr el proyecto
+## Requisitos
 
-### Opción A: Docker (recomendado, levanta el sistema completo)
+### Ejecución mediante Docker
 
-Requiere tener Docker Desktop instalado y corriendo.
+* Docker Desktop
+* Docker Compose
 
-1. Crea el archivo `.env` a partir de la plantilla incluida:
+### Ejecución local
 
-   ```bash
-   cp .env.example .env
-   ```
+* Python 3.11
+* pip
 
-   (En Windows, también puedes copiarlo manualmente desde el explorador de archivos.)
+Python 3.11 es la versión de referencia utilizada por Docker y GitHub Actions.
 
-2. Levanta todos los servicios:
+## Cómo ejecutar el proyecto
 
-   ```bash
-   docker compose up --build
-   ```
+### Opción A: Docker
 
-Esto inicia Postgres, ejecuta el pipeline (extracción + validación + entrenamiento)
-y levanta la API y el dashboard. Una vez arriba:
+Docker es la opción recomendada para levantar PostgreSQL, la API y el dashboard.
 
-- API: http://localhost:8000 (documentación interactiva en http://localhost:8000/docs)
-- Dashboard: http://localhost:8501
+#### 1. Crear el archivo de variables de entorno
 
-Ver [`docs/guia_despliegue.md`](docs/guia_despliegue.md) para más detalle.
+En Linux o macOS:
 
-### Opción B: validación y pruebas en entorno local
+```bash
+cp .env.example .env
+```
 
-La validación de datos y las pruebas automatizadas se pueden ejecutar
-localmente sin Docker (no requieren la base de datos). El pipeline completo,
-en cambio, está pensado para correr con Docker (Opción A).
+En PowerShell:
 
-Antes de ejecutar el modelo de segmentación, el proyecto incluye una etapa de
-validación de datos para revisar que las fuentes utilizadas en el pipeline ETL
-sean consistentes.
+```powershell
+Copy-Item .env.example .env
+```
 
-Para ejecutar la validación de datos:
+También puede copiarse manualmente desde el explorador de archivos.
+
+#### 2. Construir y levantar los servicios
+
+```bash
+docker compose up --build
+```
+
+Una vez levantados los contenedores:
+
+* API: `http://localhost:8000`
+* Swagger: `http://localhost:8000/docs`
+* Dashboard: `http://localhost:8501`
+
+Para detener los servicios:
+
+```bash
+docker compose down
+```
+
+Para eliminar además los volúmenes creados:
+
+```bash
+docker compose down -v
+```
+
+La guía detallada se encuentra en [`docs/guia_despliegue.md`](docs/guia_despliegue.md).
+
+## Ejecución local para desarrollo y pruebas
+
+### 1. Crear un entorno virtual
+
+#### Windows
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+```
+
+#### Linux o macOS
+
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+```
+
+La carpeta `.venv` es local y no debe subirse al repositorio.
+
+### 2. Instalar dependencias
+
+Actualizar pip:
+
+```bash
+python -m pip install --upgrade pip
+```
+
+Instalar las dependencias necesarias para desarrollo y pruebas:
+
+```bash
+python -m pip install -r requirements-dev.txt
+```
+
+`requirements-dev.txt` incluye las dependencias principales del proyecto y las dependencias adicionales utilizadas por las pruebas automatizadas.
+
+## Validación de datos
+
+Para ejecutar la validación de las fuentes:
 
 ```bash
 python etl/validate.py
 ```
 
-En Windows, si se usa Python Launcher:
+La validación comprueba:
 
-```bash
-py -3.11 etl/validate.py
-```
-
-Esta validación revisa:
-
-* columnas esperadas en cada fuente;
-* valores nulos;
+* existencia de las columnas esperadas;
+* presencia de valores nulos;
 * duplicados en `id_cliente`;
 * tipos de datos numéricos;
-* coincidencia de usuarios entre `usuarios_streaming.csv` y `perfil_usuarios.csv`;
-* correcta integración del dataset final.
+* coincidencia de usuarios entre las fuentes;
+* consistencia del dataset integrado.
 
-Además, el proyecto cuenta con pruebas automatizadas para validar las fuentes de datos:
+## Preparación del dataset
 
-```bash
-python -m unittest tests/test_validacion_datos.py
-```
-
-En Windows, si se usa Python Launcher:
+Para ejecutar la limpieza, transformación y generación de KPIs:
 
 ```bash
-py -3.11 -m unittest tests/test_validacion_datos.py
+python etl/prepare_dataset.py
 ```
 
-Si las pruebas se ejecutan correctamente, se espera una salida similar a:
+Este comando requiere que exista previamente:
 
 ```text
-Ran 8 tests in 0.035s
-
-OK
+data/data_consolidada.csv
 ```
 
-Esta etapa ayuda a asegurar que los datos estén correctamente preparados antes
-de aplicar KMeans y utilizar los resultados en el dashboard.
+## Entrenamiento de modelos
 
-## Configuración por variables de entorno
+### Modelo KMeans
 
-Las credenciales de conexión a Postgres se gestionan mediante variables de
-entorno, no están escritas en el código. El archivo `.env` (no versionado)
-contiene los valores reales, y `.env.example` sirve como plantilla de las
-variables necesarias: `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`,
-`POSTGRES_HOST` y `POSTGRES_PORT`.
+```bash
+python model/train.py
+```
 
-## Flujo de trabajo en Git
+### Modelos supervisados
 
-Cada integrante trabaja en su propia rama y todo cambio llega a `main`
-mediante Pull Request con revisión de al menos otro integrante. La rama `main`
-está protegida para requerir aprobación antes de fusionar.
+```bash
+python model/train_supervisado.py
+```
+
+## Ejecución de pruebas
+
+Para ejecutar todas las pruebas automatizadas:
+
+```bash
+python -m unittest discover -s tests -p "test_*.py" -v
+```
+
+Las pruebas cubren actualmente:
+
+* validación de fuentes;
+* preparación del dataset;
+* generación de KPIs;
+* entrenamiento de modelos supervisados;
+* predicciones;
+* endpoints de la API.
+
+También pueden ejecutarse archivos de prueba específicos:
+
+```bash
+python -m unittest tests/test_validacion_datos.py -v
+```
+
+```bash
+python -m unittest tests/test_prepare_dataset.py -v
+```
+
+```bash
+python -m unittest tests/test_modelo_supervisado.py -v
+```
+
+```bash
+python -m unittest tests/test_api.py -v
+```
+
+## API REST
+
+La API se encuentra implementada con FastAPI.
+
+Principales endpoints:
+
+```text
+GET  /
+GET  /dashboard-data
+GET  /metricas-supervisado
+POST /predict
+POST /predict-gasto
+POST /predict-riesgo
+```
+
+La documentación interactiva se encuentra disponible en:
+
+```text
+http://localhost:8000/docs
+```
+
+## Dashboard
+
+El dashboard contiene vistas orientadas a diferentes usuarios:
+
+* vista ejecutiva;
+* vista técnica;
+* vista operativa;
+* modelos supervisados y predicciones.
+
+Permite visualizar:
+
+* distribución de clusters;
+* características promedio de los segmentos;
+* métricas del modelo KMeans;
+* representación PCA;
+* métricas de clasificación y regresión;
+* predicciones para nuevos usuarios.
+
+## Integración continua
+
+El repositorio utiliza GitHub Actions para automatizar:
+
+* instalación de dependencias;
+* validación de datos;
+* entrenamiento de modelos;
+* ejecución de pruebas;
+* construcción de imágenes Docker.
+
+Las dependencias de desarrollo y testing se encuentran declaradas en:
+
+```text
+requirements-dev.txt
+```
+
+El workflow se encuentra en:
+
+```text
+.github/workflows/ci.yml
+```
+
+## Variables de entorno
+
+La plantilla `.env.example` contiene las variables necesarias para la conexión con PostgreSQL:
+
+```text
+POSTGRES_USER
+POSTGRES_PASSWORD
+POSTGRES_DB
+POSTGRES_HOST
+POSTGRES_PORT
+```
+
+El archivo `.env` contiene la configuración local y no debe versionarse.
+
+Antes de utilizar el proyecto en un ambiente distinto, se deben revisar también las configuraciones de conexión utilizadas por los módulos ETL y asegurar que no existan credenciales escritas directamente en el código.
+
+## Flujo de trabajo con Git
+
+Cada integrante desarrolla sus cambios en una rama independiente.
+
+El flujo esperado es:
+
+```text
+main
+  └── rama individual
+          └── commit
+                  └── push
+                          └── Pull Request
+                                  └── revisión
+                                          └── merge
+```
+
+Los cambios deben incorporarse a `main` mediante Pull Request y revisión de al menos otro integrante.
+
+Antes de crear un Pull Request se recomienda ejecutar:
+
+```bash
+python -m unittest discover -s tests -p "test_*.py" -v
+```
+
+## Limitaciones actuales
+
+* La variable de bajo compromiso es una etiqueta proxy y no representa churn real.
+* La validación, preparación y entrenamiento todavía se ejecutan mediante comandos separados.
+* Los modelos aún no consumen necesariamente todas las variables generadas por `prepare_dataset.py`.
+* El pipeline de integración continua no reproduce completamente PostgreSQL como fuente de entrada.
+* El dataset contiene solo 300 usuarios, por lo que los resultados deben interpretarse considerando el tamaño de la muestra.
+* Los resultados representan apoyo para decisiones y no demuestran por sí solos una reducción real del abandono.
+
+## Estado del proyecto
+
+Actualmente el repositorio contiene los principales componentes técnicos exigidos:
+
+* integración de fuentes;
+* validación;
+* preparación de datos;
+* modelos supervisados y no supervisados;
+* API;
+* dashboard;
+* Docker;
+* pruebas;
+* integración continua.
+
+La siguiente etapa consiste en integrar estos componentes dentro de un único pipeline reproducible y coherente desde la extracción hasta la visualización.

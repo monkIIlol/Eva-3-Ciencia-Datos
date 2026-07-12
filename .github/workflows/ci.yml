@@ -1,0 +1,66 @@
+name: CI
+
+# Se ejecuta en cada push y pull request hacia main, para validar que el
+# pipeline de datos, los modelos y la API sigan funcionando antes de
+# integrar cambios.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar el código
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest httpx
+
+      - name: Validar las fuentes de datos (ETL)
+        run: python etl/validate.py
+
+      - name: Generar dataset consolidado
+    
+        run: |
+          python -c "
+          import pandas as pd
+          s = pd.read_csv('data/usuarios_streaming.csv')
+          p = pd.read_csv('database/perfil_usuarios.csv')
+          s.merge(p, on='id_cliente').to_csv('data/data_consolidada.csv', index=False)
+          "
+
+      - name: Entrenar modelo de segmentación (KMeans)
+        run: python model/train.py
+
+      - name: Entrenar modelos supervisados (regresión y clasificación)
+        run: python model/train_supervisado.py
+
+      - name: Correr tests automatizados
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+
+  docker-build:
+    runs-on: ubuntu-latest
+    needs: tests
+
+    steps:
+      - name: Descargar el código
+        uses: actions/checkout@v4
+
+      - name: Construir imagen de la API
+        run: docker build -f docker/Dockerfile.api -t streaming-api:ci .
+
+      - name: Construir imagen del dashboard
+        run: docker build -f docker/Dockerfile.dashboard -t streaming-dashboard:ci .

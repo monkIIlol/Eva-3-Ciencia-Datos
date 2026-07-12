@@ -13,4 +13,5 @@ EXPOSE 8000
 
 CMD python etl/extract.py && \
     python model/train.py && \
+    python model/train_supervisado.py && \
     uvicorn api.main:app --host 0.0.0.0 --port 8000

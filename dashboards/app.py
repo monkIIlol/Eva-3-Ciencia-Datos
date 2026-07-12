@@ -44,12 +44,21 @@ def load_data():
             
     st.error("No se pudo conectar con la API de segmentación. Verifica si el contenedor 'api' inició correctamente.")
     st.stop()
+@st.cache_data
+def load_metricas_supervisado():
+    """Obtiene las métricas de los modelos de regresión y clasificación.
+    Devuelve None si aún no se han entrenado (endpoint responde 503)."""
+    try:
+        respuesta = requests.get("http://api:8000/metricas-supervisado")
+        if respuesta.status_code == 200:
+            return respuesta.json()
+    except requests.exceptions.ConnectionError:
+        pass
+    return None
 
-
-# ============================================================
-# LLAMADA A LA FUNCIÓN Y ASIGNACIÓN DE VARIABLES (CORREGIDO)
-# ============================================================
+# LLAMADA A LA FUNCIÓN Y ASIGNACIÓN DE VARIABLES 
 data, centroides, evaluacion_k, metricas = load_data()
+metricas_supervisado = load_metricas_supervisado()
 
 st.title("Segmentación de Usuarios — Streaming")
 
@@ -67,8 +76,8 @@ if df.empty:
     st.warning("Selecciona al menos un segmento en la barra lateral.")
     st.stop()
 
-tab_ejecutiva, tab_tecnica, tab_operativa = st.tabs(
-    ["Vista Ejecutiva", "Vista Técnica", "Vista Operativa"]
+tab_ejecutiva, tab_tecnica, tab_operativa, tab_predictiva = st.tabs(
+    ["Vista Ejecutiva", "Vista Técnica", "Vista Operativa", "Modelos Predictivos"]
 )
 
 # ============================================================
@@ -309,3 +318,134 @@ with tab_operativa:
         "Mismas variables y misma normalización que el mapa de calor, en formato "
         "de barras agrupadas — más preciso de leer que un gráfico radial."
     )
+# ============================================================
+# VISTA MODELOS PREDICTIVOS: regresión (gasto) y clasificación (riesgo)
+# ============================================================
+with tab_predictiva:
+    if metricas_supervisado is None:
+        st.warning(
+            "Los modelos supervisados (regresión y clasificación) todavía no están "
+            "entrenados. Corre `model/train_supervisado.py` y recarga la página."
+        )
+        st.stop()
+
+    st.subheader("Comparación de modelos entrenados")
+    st.caption(
+        "Se probó más de un algoritmo por tarea; el modelo ganador se eligió "
+        "por la métrica más relevante para el negocio (R² para regresión, F1 "
+        "para clasificación, dado el desbalance de clases)."
+    )
+
+    col_reg, col_clf = st.columns(2)
+
+    # --- Regresión: predicción de gasto mensual ---
+    with col_reg:
+        st.markdown("##### Regresión — predicción de gasto mensual")
+        reg = metricas_supervisado["regresion"]
+        mejor_reg = reg["mejor_modelo"]
+
+        df_reg = pd.DataFrame({k: v for k, v in reg.items() if isinstance(v, dict)}).T
+        df_reg = df_reg.rename(columns={"r2": "R²", "mae": "MAE", "rmse": "RMSE"})
+        st.dataframe(df_reg.round(3), use_container_width=True)
+        st.success(f"Modelo elegido: **{mejor_reg}**")
+
+    # --- Clasificación: predicción de riesgo ---
+    with col_clf:
+        st.markdown("##### Clasificación — riesgo de bajo compromiso")
+        clf = metricas_supervisado["clasificacion"]
+        mejor_clf = clf["mejor_modelo"]
+
+        df_clf = pd.DataFrame({
+            k: v for k, v in clf.items() if isinstance(v, dict)
+        }).T
+        df_clf = df_clf.rename(columns={
+            "accuracy": "Accuracy", "precision": "Precision",
+            "recall": "Recall", "f1": "F1", "roc_auc": "ROC-AUC",
+        })
+        st.dataframe(df_clf.round(3), use_container_width=True)
+        st.success(f"Modelo elegido: **{mejor_clf}**")
+
+    st.caption(
+        "Nota: porcentaje_finalizacion y sesiones_semana no se usan como "
+        "variables en el modelo de clasificación porque son las que definen "
+        "la etiqueta de riesgo (evita fuga de datos)."
+    )
+
+    st.divider()
+
+    st.subheader("Simulador: predicción para un usuario nuevo")
+    st.caption(
+        "Ingresa las variables de un usuario (real o hipotético) para ver el "
+        "gasto mensual estimado y su riesgo de bajo compromiso."
+    )
+
+    with st.form("form_prediccion"):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            horas_consumo = st.number_input("Horas de consumo mensual", 0, 200, 40)
+            contenidos = st.number_input("Cantidad de contenidos vistos", 0, 200, 20)
+            sesiones = st.number_input("Sesiones por semana", 0, 30, 6)
+            finalizacion = st.number_input("Porcentaje de finalización", 0, 100, 60)
+        with c2:
+            tiempo_sesion = st.number_input("Tiempo promedio de sesión (min)", 0, 400, 100)
+            generos = st.number_input("Cantidad de géneros consumidos", 0, 20, 5)
+            promociones = st.slider("Uso de promociones (%)", 0.0, 1.0, 0.3)
+            antiguedad = st.number_input("Antigüedad del cliente (meses)", 0, 150, 30)
+        with c3:
+            edad = st.number_input("Edad", 15, 100, 35)
+            dispositivos = st.number_input("Dispositivos registrados", 1, 10, 2)
+            uso_app = st.slider("Uso de app móvil (%)", 0.0, 1.0, 0.5)
+            perfiles = st.number_input("Cantidad de perfiles creados", 1, 10, 3)
+
+        col4, col5 = st.columns(2)
+        with col4:
+            interacciones_soporte = st.number_input("Interacciones mensuales con soporte", 0, 30, 2)
+        with col5:
+            distancia_red = st.number_input("Distancia promedio a red (km)", 0.0, 200.0, 20.0)
+
+        enviado = st.form_submit_button("Predecir")
+
+    if enviado:
+        payload = {
+            "horas_consumo_mensual": horas_consumo,
+            "cantidad_contenidos_vistos": contenidos,
+            "sesiones_semana": sesiones,
+            "porcentaje_finalizacion": finalizacion,
+            "tiempo_promedio_sesion_min": tiempo_sesion,
+            "cantidad_generos_consumidos": generos,
+            "porcentaje_uso_promociones": promociones,
+            "antiguedad_cliente_meses": antiguedad,
+            "edad": edad,
+            "dispositivos_registrados": dispositivos,
+            "porcentaje_uso_app_movil": uso_app,
+            "cantidad_perfiles_creados": perfiles,
+            "interacciones_mensuales_soporte": interacciones_soporte,
+            "distancia_promedio_red_km": distancia_red,
+        }
+
+        col_res1, col_res2 = st.columns(2)
+
+        try:
+            r_gasto = requests.post("http://api:8000/predict-gasto", json=payload)
+            r_riesgo = requests.post("http://api:8000/predict-riesgo", json=payload)
+
+            with col_res1:
+                if r_gasto.status_code == 200:
+                    gasto = r_gasto.json()["gasto_mensual_predicho"]
+                    st.metric("Gasto mensual estimado", f"${gasto:,.0f}")
+                else:
+                    st.error("No se pudo obtener la predicción de gasto.")
+
+            with col_res2:
+                if r_riesgo.status_code == 200:
+                    resultado = r_riesgo.json()
+                    riesgo = resultado["riesgo_bajo_compromiso"]
+                    prob = resultado["probabilidad"]
+                    if riesgo == 1:
+                        st.metric("Riesgo de bajo compromiso", "Sí", delta=f"{prob:.0%} prob.", delta_color="inverse")
+                    else:
+                        st.metric("Riesgo de bajo compromiso", "No", delta=f"{prob:.0%} prob.", delta_color="normal")
+                else:
+                    st.error("No se pudo obtener la predicción de riesgo.")
+        except requests.exceptions.ConnectionError:
+            st.error("No se pudo conectar con la API.")

@@ -2,26 +2,32 @@
 
 ## Objetivo
 
-El objetivo del pipeline es integrar datos de usuarios, validar su calidad y preparar un dataset analítico listo para análisis, segmentación y modelos de Machine Learning.
+El objetivo del pipeline es integrar datos de usuarios, validar su calidad, preparar datasets confiables y entrenar modelos de Machine Learning de forma ordenada y reproducible.
 
-Esta etapa permite que el proyecto no dependa directamente de datos crudos, sino de un dataset preparado, documentado y validado.
+El pipeline permite que el proyecto no entrene modelos directamente sobre datos crudos, sino sobre una salida limpia, validada y controlada.
+
+El archivo principal del flujo integrado es:
+
+`pipeline/run.py`
 
 ## Flujo general del pipeline
 
 ```text
 usuarios_streaming.csv + perfil_usuarios
 ↓
-etl/extract.py
+extracción de fuentes
 ↓
-data/data_consolidada.csv
+validación de datos
 ↓
-etl/prepare_dataset.py
+integración por id_cliente
 ↓
-data/dataset_modelo.csv
-data/kpis_negocio.csv
-data/reporte_calidad.json
+preparación del dataset
 ↓
-modelos ML + API + dashboard
+dataset_base_limpio.csv + dataset_analitico.csv
+↓
+KMeans + modelos supervisados
+↓
+API + dashboard
 ```
 
 ## Fuentes de datos
@@ -35,9 +41,15 @@ El proyecto integra dos fuentes principales:
 
 La integración se realiza mediante la columna `id_cliente`.
 
-## Extracción e integración
+## Extracción, validación e integración
 
-El archivo `etl/extract.py` se encarga de integrar las fuentes de datos.
+El proceso ETL contempla tres responsabilidades principales.
+
+| Etapa | Archivo | Descripción |
+|---|---|---|
+| Extracción | `etl/extract.py` | Obtiene los datos desde las fuentes disponibles. |
+| Validación | `etl/validate.py` | Revisa columnas esperadas, nulos, duplicados, tipos numéricos y compatibilidad entre fuentes. |
+| Integración | `etl/integrate.py` | Une las fuentes mediante `id_cliente` y genera el dataset consolidado. |
 
 La salida principal de esta etapa es:
 
@@ -45,104 +57,114 @@ La salida principal de esta etapa es:
 data/data_consolidada.csv
 ```
 
-Este archivo contiene los datos unidos antes de aplicar la preparación analítica.
+Este archivo contiene los datos integrados antes de la preparación analítica.
 
-## Validación previa
+## Preparación del dataset
 
-El proyecto también cuenta con validaciones en:
-
-```text
-etl/validate.py
-```
-
-Estas validaciones revisan aspectos como:
-
-- columnas esperadas;
-- valores nulos;
-- duplicados por `id_cliente`;
-- tipos numéricos;
-- coincidencia de identificadores entre fuentes;
-- dataset integrado final.
-
-## Preparación del dataset analítico
-
-El archivo principal de esta etapa es:
+La preparación se realiza en:
 
 ```text
 etl/prepare_dataset.py
 ```
 
-Este módulo toma `data/data_consolidada.csv` y genera un dataset preparado para análisis y modelos.
+Esta etapa toma el dataset integrado y genera salidas separadas según su propósito.
 
-La salida principal es:
+| Archivo | Propósito |
+|---|---|
+| `data/dataset_base_limpio.csv` | Dataset limpio con variables base oficiales. Es la entrada principal de los modelos. |
+| `data/dataset_analitico.csv` | Dataset enriquecido con variables derivadas para análisis, KPIs y visualización. |
+| `data/dataset_modelo.csv` | Archivo conservado por compatibilidad con versiones anteriores del proyecto. |
+| `data/kpis_negocio.csv` | KPIs agrupados por nivel de engagement y valor de cliente. |
+| `data/reporte_calidad.json` | Evidencia automática de calidad, nulos, rangos, outliers y variables derivadas. |
 
-```text
-data/dataset_modelo.csv
-```
+## Separación entre dataset base y dataset analítico
 
-Además genera:
+Una decisión importante del pipeline es separar el dataset limpio de modelado y el dataset enriquecido de análisis.
 
-```text
-data/kpis_negocio.csv
-data/reporte_calidad.json
-```
+### `dataset_base_limpio.csv`
+
+Contiene las variables originales limpias, validadas y listas para modelado.
+
+Este dataset se usa como entrada para:
+
+- KMeans;
+- regresión;
+- clasificación.
+
+### `dataset_analitico.csv`
+
+Contiene variables derivadas útiles para análisis de negocio, KPIs y visualización.
+
+Ejemplos:
+
+- `contenidos_por_sesion`;
+- `gasto_por_hora`;
+- `engagement_score`;
+- `nivel_engagement`;
+- `valor_cliente`.
+
+Estas variables no se incorporan automáticamente a los modelos para evitar fuga de datos.
+
+Por ejemplo, si el objetivo de regresión es predecir `gasto_mensual`, no corresponde usar `gasto_por_hora`, porque esa variable contiene información directa del gasto.
 
 ## Limpieza aplicada
 
-La etapa de preparación aplica reglas de limpieza para mejorar la calidad del dataset.
+La etapa de preparación aplica reglas de limpieza para mejorar la calidad del dataset y evitar errores posteriores en los modelos.
 
 ### Tratamiento de `id_cliente`
 
-`id_cliente` se considera un identificador único.
+`id_cliente` se considera un identificador único y crítico.
 
 Por eso:
 
-- no se imputa con mediana;
+- no se imputa;
 - no se inventa estadísticamente;
-- si viene nulo, el registro se elimina;
-- después de la limpieza se valida que no queden duplicados.
+- no puede ser nulo;
+- no puede ser no numérico;
+- no puede estar duplicado;
+- no puede ser menor o igual a cero.
 
-Esta decisión evita crear clientes artificiales o duplicar IDs existentes.
+Si `id_cliente` no cumple estas reglas, el pipeline detiene la ejecución. Esta decisión evita crear clientes artificiales o alterar identificadores reales.
 
 ### Tratamiento de nulos
 
-Las columnas numéricas, excepto `id_cliente`, se convierten a formato numérico.
+Las columnas numéricas se convierten a formato numérico cuando corresponde.
 
-Si aparecen nulos, se imputan con la mediana.
+Para variables analíticas, los nulos pueden imputarse con mediana cuando es metodológicamente válido.
 
 Se usa mediana porque es menos sensible a valores extremos que el promedio.
 
 ### Tratamiento de infinitos
 
-Los valores infinitos se reemplazan antes de imputar.
+Los valores infinitos se reemplazan antes de imputar o procesar.
 
 Esto evita errores por divisiones inválidas o datos mal formados.
 
 ### Rangos de negocio
 
-Se aplican reglas para evitar valores imposibles:
+Se aplican reglas para evitar valores imposibles o inconsistentes.
 
-| Variable | Regla aplicada |
+| Variable | Regla general |
 |---|---|
-| `sesiones_semana` | mínimo 1 |
-| `horas_consumo_mensual` | mínimo 0.1 |
+| `sesiones_semana` | valor positivo |
+| `horas_consumo_mensual` | valor positivo |
 | `gasto_mensual` | mínimo 0 |
 | `cantidad_contenidos_vistos` | mínimo 0 |
 | `tiempo_promedio_sesion_min` | mínimo 0 |
 | `cantidad_generos_consumidos` | mínimo 0 |
 | `antiguedad_cliente_meses` | mínimo 0 |
-| `edad` | entre 13 y 100 |
+| `edad` | rango válido de edad |
 | `dispositivos_registrados` | mínimo 1 |
 | `cantidad_perfiles_creados` | mínimo 1 |
 | `interacciones_mensuales_soporte` | mínimo 0 |
 | `distancia_promedio_red_km` | mínimo 0 |
-| `porcentaje_finalizacion` | entre 0 y 100 |
-| `porcentaje_uso_promociones` | entre 0 y 1 |
-| `porcentaje_uso_app_movil` | entre 0 y 1 |
+| `porcentaje_finalizacion` | rango porcentual válido |
+| `porcentaje_uso_promociones` | rango entre 0 y 1 |
+| `porcentaje_uso_app_movil` | rango entre 0 y 1 |
 
 ## Tratamiento de outliers
 
-Se aplica el método IQR para detectar valores extremos.
+El pipeline utiliza diagnóstico de outliers mediante IQR.
 
 ```text
 IQR = Q3 - Q1
@@ -150,17 +172,14 @@ Límite inferior = Q1 - 1.5 * IQR
 Límite superior = Q3 + 1.5 * IQR
 ```
 
-En vez de eliminar registros, se usa winsorización mediante `clip`.
+Este análisis permite detectar valores extremos y registrar evidencia en el reporte de calidad.
 
-Esto permite conservar la cantidad de usuarios, pero reduce el impacto de valores extremos.
+## Variables derivadas
 
-## Variables derivadas creadas
-
-El proceso de preparación genera variables nuevas para enriquecer el análisis.
+El dataset analítico incorpora variables derivadas para enriquecer el análisis de comportamiento de usuarios.
 
 | Variable | Descripción |
 |---|---|
-| `sesiones_mes_estimadas` | Estimación mensual de sesiones a partir de `sesiones_semana * 4`. |
 | `contenidos_por_sesion` | Promedio de contenidos vistos por sesión mensual estimada. |
 | `gasto_por_hora` | Relación entre gasto mensual y horas de consumo. |
 | `minutos_totales_estimados` | Conversión de horas mensuales a minutos. |
@@ -168,35 +187,29 @@ El proceso de preparación genera variables nuevas para enriquecer el análisis.
 | `generos_por_contenido` | Relación entre géneros consumidos y contenidos vistos. |
 | `engagement_score` | Indicador relativo de compromiso del usuario. |
 | `nivel_engagement` | Clasificación del usuario en bajo, medio o alto engagement. |
-| `cliente_antiguo` | Indicador de clientes con al menos 36 meses de antigüedad. |
-| `uso_promociones_alto` | Indicador de usuarios con uso de promociones igual o superior a 50%. |
+| `cliente_antiguo` | Indicador de clientes con antigüedad relevante. |
+| `uso_promociones_alto` | Indicador de usuarios con alto uso de promociones. |
 | `valor_cliente` | Segmentación descriptiva: alto valor, valor medio o valor en riesgo. |
 
-## Corrección conceptual importante
+## Corrección conceptual de `contenidos_por_sesion`
 
-La variable `contenidos_por_sesion` no se calcula directamente como:
+La variable `contenidos_por_sesion` no se calcula directamente dividiendo por `sesiones_semana`, porque una variable es mensual y la otra semanal.
 
-```text
-cantidad_contenidos_vistos / sesiones_semana
-```
-
-porque una variable es mensual y la otra semanal.
-
-Por eso primero se calcula:
+Primero se estima una cantidad mensual de sesiones:
 
 ```text
 sesiones_mes_estimadas = sesiones_semana * 4
 ```
 
-y luego:
+Luego se calcula:
 
 ```text
 contenidos_por_sesion = cantidad_contenidos_vistos / sesiones_mes_estimadas
 ```
 
-Esto hace que la interpretación sea más coherente.
+`sessions_mes_estimadas` funciona como cálculo intermedio para construir una variable más coherente.
 
-## KPIs de negocio generados
+## KPIs de negocio
 
 El archivo:
 
@@ -210,7 +223,7 @@ Incluye:
 
 - cantidad de usuarios;
 - gasto promedio;
-- consumo promedio en horas;
+- consumo promedio;
 - finalización promedio;
 - uso promedio de promociones;
 - antigüedad promedio;
@@ -228,72 +241,115 @@ data/reporte_calidad.json
 
 registra evidencia automática del proceso de preparación.
 
-Incluye:
+Puede incluir información como:
 
 - filas y columnas originales;
 - filas y columnas finales;
-- IDs nulos eliminados;
-- duplicados eliminados;
+- validación de identificadores;
+- duplicados detectados;
 - nulos antes y después de limpieza;
-- outliers detectados mediante IQR;
+- diagnóstico de outliers;
 - memoria utilizada;
 - variables derivadas creadas;
-- nota metodológica.
+- notas metodológicas.
 
 ## Optimización de memoria
 
-El dataset preparado aplica reducción de tipos numéricos mediante `downcast`.
+El dataset preparado aplica reducción de tipos numéricos cuando corresponde.
 
 Esto ayuda a reducir el consumo de memoria y mejora la escalabilidad del pipeline para datasets más grandes.
 
-## Pruebas automatizadas
+## Variables oficiales de modelado
 
-Las pruebas se encuentran en:
+Las variables usadas por los modelos están centralizadas en:
 
 ```text
-tests/test_prepare_dataset.py
+config/features.py
 ```
 
-Se validan casos normales y casos negativos.
+Esto evita que cada modelo seleccione columnas de forma independiente.
 
-Las pruebas comprueban que:
-
-- se generen los archivos de salida;
-- existan las variables derivadas;
-- no existan nulos en variables críticas;
-- no existan infinitos;
-- `engagement_score` esté entre 0 y 1;
-- las categorías de `nivel_engagement` y `valor_cliente` sean válidas;
-- los KPIs tengan contenido;
-- el reporte de calidad tenga información relevante.
-
-## Pruebas negativas agregadas
-
-También se agregaron pruebas con datos problemáticos artificiales.
-
-| Caso probado | Objetivo |
+| Modelo | Configuración |
 |---|---|
-| `id_cliente` nulo | Verificar que se elimine y no se impute. |
-| `id_cliente` duplicado | Verificar que se eliminen duplicados. |
-| Columna faltante | Verificar que se lance error. |
-| Valores negativos | Verificar corrección de rangos. |
-| Porcentajes fuera de rango | Verificar límites válidos. |
-| Strings en columnas numéricas | Verificar conversión e imputación. |
-| Valores infinitos | Verificar reemplazo correcto. |
-| `contenidos_por_sesion` | Verificar que use sesiones mensuales estimadas. |
+| KMeans | `KMEANS_FEATURES` |
+| Regresión | `REGRESSION_FEATURES` |
+| Clasificación | `CLASSIFICATION_FEATURES` |
+
+Esta separación también ayuda a evitar fuga de datos.
+
+## Modelos entrenados
+
+El pipeline entrena modelos no supervisados y supervisados.
+
+| Tipo | Archivo | Propósito |
+|---|---|---|
+| KMeans | `model/train.py` | Segmentación de usuarios. |
+| Regresión | `model/train_supervisado.py` | Predicción de `gasto_mensual`. |
+| Clasificación | `model/train_supervisado.py` | Predicción de `riesgo_bajo_compromiso`. |
+
+## API y dashboard
+
+Los artefactos generados por el pipeline son utilizados posteriormente por:
+
+| Componente | Archivo |
+|---|---|
+| API | `api/main.py` |
+| Dashboard | `dashboards/app.py` |
+
+La API expone resultados de segmentación, métricas y predicciones.
+
+El dashboard permite visualizar la información desde una perspectiva ejecutiva, técnica, operativa y predictiva.
+
+## Docker Compose
+
+El flujo integrado considera servicios separados:
+
+```text
+postgres
+↓
+pipeline
+↓
+api
+↓
+dashboard
+```
+
+Esta estructura permite que:
+
+- PostgreSQL esté disponible antes de ejecutar el pipeline;
+- la API espere los artefactos generados;
+- el dashboard espere a que la API esté saludable.
+
+## Pruebas automatizadas
+
+Las pruebas se encuentran en la carpeta:
+
+```text
+tests/
+```
+
+Incluyen pruebas de:
+
+- validación de datos;
+- preparación del dataset;
+- modelos supervisados;
+- API;
+- pipeline integrado.
+
+La cantidad exacta de pruebas puede variar según la versión del repositorio, pero el resultado esperado es que la suite complete correctamente con `OK`.
 
 ## Comandos principales
+
+Ejecutar pipeline completo:
+
+```bash
+py -3.11 -m pipeline.run
+```
 
 Ejecutar preparación del dataset:
 
 ```bash
 py -3.11 etl/prepare_dataset.py
-```
-
-Ejecutar pruebas de preparación:
-
-```bash
-py -3.11 -m unittest tests/test_prepare_dataset.py
 ```
 
 Ejecutar toda la suite de pruebas:
@@ -302,50 +358,45 @@ Ejecutar toda la suite de pruebas:
 py -3.11 -m unittest discover tests
 ```
 
-Resultado esperado:
+Ejecutar Docker Compose:
 
-```text
-Ran 25 tests
-OK
+```bash
+docker compose up --build
 ```
 
 ## Valor para el proyecto
 
 Esta etapa fortalece el proyecto porque:
 
-- transforma datos consolidados en un dataset analítico;
-- evita trabajar directamente con datos crudos;
-- aplica limpieza robusta;
-- controla errores comunes;
-- genera variables útiles para análisis y modelos;
+- evita entrenar modelos directamente sobre datos crudos;
+- incorpora validación y preparación antes del modelado;
+- separa dataset base limpio y dataset analítico;
+- reduce el riesgo de fuga de datos;
+- genera variables útiles para análisis;
 - crea KPIs de negocio;
 - deja evidencia de calidad de datos;
-- incorpora pruebas automatizadas y casos negativos;
-- prepara el camino para que modelos, API y dashboard usen un dataset más confiable.
+- centraliza variables oficiales de modelado;
+- permite una ejecución reproducible mediante pipeline integrado;
+- entrega una historia técnica coherente para la defensa del EFT.
 
-## Limitación actual
+## Limitaciones y mejoras futuras
 
-Actualmente `dataset_modelo.csv` queda preparado para ser utilizado por los modelos.
+Aunque el pipeline integrado mejora la solución, todavía se pueden realizar mejoras:
 
-La integración final debe hacer que:
+- ampliar pruebas negativas con más casos problemáticos;
+- exponer más KPIs desde la API;
+- mostrar el reporte de calidad directamente en el dashboard;
+- agregar monitoreo de tiempos por etapa;
+- publicar imágenes Docker en un registro externo;
+- automatizar un despliegue continuo real.
 
-```text
-model/train.py
-model/train_supervisado.py
-API
-dashboard
-Docker
-CI
-```
-
-usen o muestren los resultados generados por esta etapa.
-
-Esta integración debe realizarse en una rama grupal para evitar conflictos con los cambios de otros integrantes.
+Estas limitaciones no invalidan el flujo actual, sino que representan mejoras para una versión más productiva.
 
 ## Documentos relacionados
 
 | Documento | Descripción |
 |---|---|
-| `docs/diccionario_datos.md` | Explica las variables originales y derivadas. |
+| `docs/diccionario_datos.md` | Explica variables originales y derivadas. |
 | `docs/reporte_calidad_datos.md` | Explica reglas de limpieza, outliers, pruebas y decisiones metodológicas. |
-| `data/reporte_calidad.json` | Evidencia automática generada por el script. |
+| `docs/diseno_pipeline_integrado.md` | Describe la arquitectura del pipeline integrado. |
+| `data/reporte_calidad.json` | Evidencia automática generada por el pipeline. |

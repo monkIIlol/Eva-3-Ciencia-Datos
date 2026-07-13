@@ -1,80 +1,189 @@
-"""
-Entrenamiento de los modelos supervisados del proyecto.
-Acá se entrenan dos modelos con objetivos distintos:
-- Regresión: estima el gasto_mensual de un usuario según su comportamiento
-  y perfil.
-- Clasificación: predice si un usuario tiene riesgo de bajo compromiso.
-Para cada tarea se prueban dos algoritmos distintos con pipeline
-(escalamiento + modelo) y se ajustan hiperparámetros con GridSearchCV.
-"""
-import os
+"""Entrenamiento contractual de regresión y clasificación."""
+from __future__ import annotations
+
 import json
-import pickle
 import logging
+import pickle
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
-import pandas as pd
 import numpy as np
-
-from sklearn.model_selection import train_test_split, GridSearchCV
+import pandas as pd
+from sklearn.base import clone
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.linear_model import LinearRegression, LogisticRegression
+from sklearn.metrics import (
+    accuracy_score,
+    confusion_matrix,
+    f1_score,
+    mean_absolute_error,
+    mean_squared_error,
+    precision_score,
+    r2_score,
+    recall_score,
+    roc_auc_score,
+)
+from sklearn.model_selection import GridSearchCV, KFold, StratifiedKFold, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
-from sklearn.linear_model import LinearRegression, LogisticRegression
-from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
-from sklearn.metrics import (
-    r2_score, mean_absolute_error, mean_squared_error,
-    accuracy_score, precision_score, recall_score, f1_score, roc_auc_score,
-)
 
-logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO"),
-    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
+from config.features import (
+    CLASSIFICATION_FEATURES,
+    CLASSIFICATION_TARGET,
+    CLASSIFICATION_TARGET_SOURCE_COLUMNS,
+    ID_COLUMN,
+    REGRESSION_FEATURES,
+    REGRESSION_TARGET,
 )
+from config.settings import Settings, settings
+from etl.contracts import ModelTrainingError
+
 logger = logging.getLogger(__name__)
 
-os.makedirs("models", exist_ok=True)
-
-RANDOM_STATE = 29
-
-#1. Cargar el dataset consolidado
-data = pd.read_csv("data/data_consolidada.csv")
-
-FEATURES = [
-    "horas_consumo_mensual",
-    "cantidad_contenidos_vistos",
-    "sesiones_semana",
-    "porcentaje_finalizacion",
-    "tiempo_promedio_sesion_min",
-    "cantidad_generos_consumidos",
-    "porcentaje_uso_promociones",
-    "antiguedad_cliente_meses",
-    "edad",
-    "dispositivos_registrados",
-    "porcentaje_uso_app_movil",
-    "cantidad_perfiles_creados",
-    "interacciones_mensuales_soporte",
-    "distancia_promedio_red_km",
-]
-# `riesgo_bajo_compromiso` se construye a partir de `porcentaje_finalizacion`
-# y `sesiones_semana`. Si esas dos variables se
-# dejan como features, el modelo prácticamente memoriza.
-FEATURES_CLASIFICACION = [
-    f for f in FEATURES
-    if f not in ("porcentaje_finalizacion", "sesiones_semana")
-]
-
-resultados = {"regresion": {}, "clasificacion": {}}
+# Alias de compatibilidad con imports anteriores.
+FEATURES = REGRESSION_FEATURES
+FEATURES_CLASIFICACION = CLASSIFICATION_FEATURES
 
 
-#2.TAREA DE REGRESIÓN: predecir gasto_mensual
-def entrenar_regresion(data):
-    logger.info("=== Entrenando modelos de regresión (target: gasto_mensual) ===")
+@dataclass
+class RegressionTrainingResult:
+    modelo: Any
+    metricas: dict[str, Any]
+    predicciones_test: pd.DataFrame
 
-    X = data[FEATURES]
-    y = data["gasto_mensual"]
 
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=RANDOM_STATE
+@dataclass
+class ClassificationTrainingResult:
+    modelo: Any
+    metricas: dict[str, Any]
+    predicciones_test: pd.DataFrame
+
+
+@dataclass
+class SupervisedTrainingResult:
+    regresion: RegressionTrainingResult
+    clasificacion: ClassificationTrainingResult
+    metricas: dict[str, Any]
+
+
+def cargar_dataset_base(ruta: str | Path | None = None, config: Settings = settings) -> pd.DataFrame:
+    ruta_dataset = Path(ruta) if ruta is not None else config.clean_base_dataset
+    if not ruta_dataset.exists():
+        raise ModelTrainingError(
+            f"No se encontró el dataset base limpio: {ruta_dataset}. "
+            "Ejecuta primero la etapa de preparación."
+        )
+    try:
+        df = pd.read_csv(ruta_dataset)
+    except (OSError, pd.errors.ParserError) as exc:
+        raise ModelTrainingError(f"No fue posible cargar el dataset base limpio: {exc}") from exc
+    if df.empty:
+        raise ModelTrainingError("El dataset base limpio está vacío.")
+    return df
+
+
+def validar_entrada_supervisada(df: pd.DataFrame) -> pd.DataFrame:
+    if not isinstance(df, pd.DataFrame):
+        raise ModelTrainingError("El entrenamiento supervisado requiere un DataFrame.")
+    if df.empty:
+        raise ModelTrainingError("No se puede entrenar con un dataset vacío.")
+
+    requeridas = {
+        ID_COLUMN,
+        REGRESSION_TARGET,
+        *REGRESSION_FEATURES,
+        *CLASSIFICATION_FEATURES,
+        *CLASSIFICATION_TARGET_SOURCE_COLUMNS,
+    }
+    faltantes = sorted(requeridas - set(df.columns))
+    if faltantes:
+        raise ModelTrainingError(f"Faltan columnas para los modelos supervisados: {faltantes}")
+
+    fuga = sorted(set(CLASSIFICATION_FEATURES) & set(CLASSIFICATION_TARGET_SOURCE_COLUMNS))
+    if fuga:
+        raise ModelTrainingError(
+            "Las variables que construyen la etiqueta de clasificación no pueden usarse como features: "
+            f"{fuga}"
+        )
+    if REGRESSION_TARGET in REGRESSION_FEATURES:
+        raise ModelTrainingError("El target de regresión aparece dentro de sus features.")
+
+    columnas = [
+        ID_COLUMN,
+        REGRESSION_TARGET,
+        *REGRESSION_FEATURES,
+        *CLASSIFICATION_FEATURES,
+        *CLASSIFICATION_TARGET_SOURCE_COLUMNS,
+    ]
+    columnas = list(dict.fromkeys(columnas))
+    data = df[columnas].copy()
+
+    for columna in columnas:
+        serie = pd.to_numeric(data[columna], errors="coerce")
+        if serie.isna().any():
+            raise ModelTrainingError(f"La columna {columna} contiene valores nulos o no numéricos.")
+        if np.isinf(serie).any():
+            raise ModelTrainingError(f"La columna {columna} contiene valores infinitos.")
+        data[columna] = serie
+
+    if data[ID_COLUMN].duplicated().any():
+        raise ModelTrainingError("id_cliente contiene valores duplicados.")
+    if len(data) < 30:
+        raise ModelTrainingError("Se requieren al menos 30 registros para entrenar y evaluar.")
+    return data
+
+
+def _ajustar_candidatos(
+    candidatos: dict[str, dict[str, Any]],
+    x_train: pd.DataFrame,
+    y_train: pd.Series,
+    cv: Any,
+    scoring: str,
+    n_jobs: int,
+) -> dict[str, dict[str, Any]]:
+    ajustados: dict[str, dict[str, Any]] = {}
+    for nombre, especificacion in candidatos.items():
+        buscador = GridSearchCV(
+            estimator=especificacion["pipeline"],
+            param_grid=especificacion["grid"],
+            scoring=scoring,
+            cv=cv,
+            n_jobs=n_jobs,
+            refit=True,
+            return_train_score=False,
+            error_score="raise",
+        )
+        buscador.fit(x_train, y_train)
+        indice = int(buscador.best_index_)
+        ajustados[nombre] = {
+            "modelo": buscador.best_estimator_,
+            "best_params": buscador.best_params_,
+            "cv_score_mean": float(buscador.best_score_),
+            "cv_score_std": float(buscador.cv_results_["std_test_score"][indice]),
+        }
+        logger.info(
+            "%s: mejor CV=%.4f ± %.4f | params=%s",
+            nombre,
+            ajustados[nombre]["cv_score_mean"],
+            ajustados[nombre]["cv_score_std"],
+            ajustados[nombre]["best_params"],
+        )
+    return ajustados
+
+
+def entrenar_regresion(
+    data: pd.DataFrame,
+    config: Settings = settings,
+) -> RegressionTrainingResult:
+    data = validar_entrada_supervisada(data)
+    x = data[REGRESSION_FEATURES]
+    y = data[REGRESSION_TARGET]
+    x_train, x_test, y_train, y_test = train_test_split(
+        x,
+        y,
+        test_size=0.20,
+        random_state=config.random_state,
     )
 
     candidatos = {
@@ -83,12 +192,11 @@ def entrenar_regresion(data):
                 ("scaler", StandardScaler()),
                 ("modelo", LinearRegression()),
             ]),
-            "grid": {},
+            "grid": [{}],
         },
         "random_forest_regressor": {
             "pipeline": Pipeline([
-                ("scaler", StandardScaler()),
-                ("modelo", RandomForestRegressor(random_state=RANDOM_STATE)),
+                ("modelo", RandomForestRegressor(random_state=config.random_state)),
             ]),
             "grid": {
                 "modelo__n_estimators": [100, 200],
@@ -96,86 +204,115 @@ def entrenar_regresion(data):
             },
         },
     }
+    cv = KFold(n_splits=5, shuffle=True, random_state=config.random_state)
+    ajustados = _ajustar_candidatos(
+        candidatos, x_train, y_train, cv, "r2", config.n_jobs
+    )
 
-    mejor_modelo = None
-    mejor_r2 = -np.inf
-    mejor_nombre = None
-
-    for nombre, config in candidatos.items():
-        if config["grid"]:
-            buscador = GridSearchCV(
-                config["pipeline"], config["grid"], cv=5, scoring="r2", n_jobs=-1
-            )
-            buscador.fit(X_train, y_train)
-            modelo = buscador.best_estimator_
-            logger.info("%s: mejores hiperparámetros %s", nombre, buscador.best_params_)
-        else:
-            modelo = config["pipeline"]
-            modelo.fit(X_train, y_train)
-
-        pred = modelo.predict(X_test)
-        metricas = {
+    metricas_candidatos: dict[str, Any] = {}
+    for nombre, info in ajustados.items():
+        pred = info["modelo"].predict(x_test)
+        metricas_candidatos[nombre] = {
             "r2": float(r2_score(y_test, pred)),
             "mae": float(mean_absolute_error(y_test, pred)),
             "rmse": float(np.sqrt(mean_squared_error(y_test, pred))),
+            "cv_r2_mean": info["cv_score_mean"],
+            "cv_r2_std": info["cv_score_std"],
+            "best_params": info["best_params"],
         }
-        resultados["regresion"][nombre] = metricas
-        logger.info("%s: R2=%.3f | MAE=%.2f | RMSE=%.2f",
-                    nombre, metricas["r2"], metricas["mae"], metricas["rmse"])
 
-        if metricas["r2"] > mejor_r2:
-            mejor_r2 = metricas["r2"]
-            mejor_modelo = modelo
-            mejor_nombre = nombre
+    mejor_nombre = max(
+        ajustados,
+        key=lambda nombre: ajustados[nombre]["cv_score_mean"],
+    )
+    modelo_evaluado = ajustados[mejor_nombre]["modelo"]
+    pred_final = modelo_evaluado.predict(x_test)
 
-    logger.info("Mejor modelo de regresión: %s (R2=%.3f)", mejor_nombre, mejor_r2)
-    resultados["regresion"]["mejor_modelo"] = mejor_nombre
+    # Tras seleccionar y evaluar, se reajusta el ganador con todos los datos
+    # para producir el artefacto usado por la API.
+    modelo_produccion = clone(modelo_evaluado)
+    modelo_produccion.fit(x, y)
 
-    pickle.dump(mejor_modelo, open("models/modelo_regresion_gasto.pkl", "wb"))
-    return mejor_modelo
+    predicciones = pd.DataFrame({
+        ID_COLUMN: data.loc[x_test.index, ID_COLUMN].astype("int64"),
+        "valor_real": y_test,
+        "valor_predicho": pred_final,
+        "residuo": y_test - pred_final,
+    }).reset_index(drop=True)
+
+    metricas = {
+        **metricas_candidatos,
+        "mejor_modelo": mejor_nombre,
+        "criterio_seleccion": "mayor_cv_r2_mean_en_train",
+        "n_train": int(len(x_train)),
+        "n_test": int(len(x_test)),
+    }
+    logger.info(
+        "Regresión seleccionada por CV: %s | test R2=%.3f",
+        mejor_nombre,
+        metricas_candidatos[mejor_nombre]["r2"],
+    )
+    return RegressionTrainingResult(modelo_produccion, metricas, predicciones)
 
 
-#3. TAREA DE CLASIFICACIÓN: predecir riesgo_bajo_compromiso
-def entrenar_clasificacion(data):
-    logger.info("=== Entrenando modelos de clasificación (target: riesgo_bajo_compromiso) ===")
-
-    umbral_finalizacion = data["porcentaje_finalizacion"].median()
-    umbral_sesiones = data["sesiones_semana"].median()
-
-    data = data.copy()
-    data["riesgo_bajo_compromiso"] = (
+def _crear_etiqueta_riesgo(
+    data: pd.DataFrame,
+    umbral_finalizacion: float,
+    umbral_sesiones: float,
+) -> pd.Series:
+    return (
         (data["porcentaje_finalizacion"] < umbral_finalizacion)
         & (data["sesiones_semana"] < umbral_sesiones)
-    ).astype(int)
+    ).astype("int8")
 
-    logger.info(
-        "Umbrales usados -> finalización < %.1f y sesiones/semana < %.1f. "
-        "Positivos (riesgo=1): %d de %d usuarios",
-        umbral_finalizacion, umbral_sesiones,
-        data["riesgo_bajo_compromiso"].sum(), len(data),
+
+def entrenar_clasificacion(
+    data: pd.DataFrame,
+    config: Settings = settings,
+) -> ClassificationTrainingResult:
+    data = validar_entrada_supervisada(data)
+
+    indices_train, indices_test = train_test_split(
+        data.index,
+        test_size=0.20,
+        random_state=config.random_state,
     )
+    train_data = data.loc[indices_train]
+    test_data = data.loc[indices_test]
 
-    X = data[FEATURES_CLASIFICACION]
-    y = data["riesgo_bajo_compromiso"]
+    # Los umbrales se calculan solo con train. El holdout no participa
+    # en la construcción de la etiqueta ni en la selección del modelo.
+    umbral_finalizacion = float(train_data["porcentaje_finalizacion"].median())
+    umbral_sesiones = float(train_data["sesiones_semana"].median())
+    y_train = _crear_etiqueta_riesgo(train_data, umbral_finalizacion, umbral_sesiones)
+    y_test = _crear_etiqueta_riesgo(test_data, umbral_finalizacion, umbral_sesiones)
 
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=RANDOM_STATE, stratify=y
-    )
+    if y_train.nunique() < 2 or y_test.nunique() < 2:
+        raise ModelTrainingError(
+            "La división train/test no contiene ambas clases de riesgo. "
+            "Ajusta random_state o la definición de la etiqueta."
+        )
+    minimo_clase = int(y_train.value_counts().min())
+    n_splits = min(5, minimo_clase)
+    if n_splits < 2:
+        raise ModelTrainingError("No hay suficientes ejemplos por clase para validación cruzada.")
 
+    x_train = train_data[CLASSIFICATION_FEATURES]
+    x_test = test_data[CLASSIFICATION_FEATURES]
     candidatos = {
         "regresion_logistica": {
             "pipeline": Pipeline([
                 ("scaler", StandardScaler()),
-                ("modelo", LogisticRegression(max_iter=1000, random_state=RANDOM_STATE)),
+                ("modelo", LogisticRegression(
+                    max_iter=1000,
+                    random_state=config.random_state,
+                )),
             ]),
-            "grid": {
-                "modelo__C": [0.1, 1.0, 10.0],
-            },
+            "grid": {"modelo__C": [0.1, 1.0, 10.0]},
         },
         "random_forest_classifier": {
             "pipeline": Pipeline([
-                ("scaler", StandardScaler()),
-                ("modelo", RandomForestClassifier(random_state=RANDOM_STATE)),
+                ("modelo", RandomForestClassifier(random_state=config.random_state)),
             ]),
             "grid": {
                 "modelo__n_estimators": [100, 200],
@@ -183,56 +320,188 @@ def entrenar_clasificacion(data):
             },
         },
     }
+    cv = StratifiedKFold(
+        n_splits=n_splits,
+        shuffle=True,
+        random_state=config.random_state,
+    )
+    ajustados = _ajustar_candidatos(
+        candidatos, x_train, y_train, cv, "f1", config.n_jobs
+    )
 
-    mejor_modelo = None
-    mejor_f1 = -np.inf
-    mejor_nombre = None
-
-    for nombre, config in candidatos.items():
-        buscador = GridSearchCV(
-            config["pipeline"], config["grid"], cv=5, scoring="f1", n_jobs=-1
-        )
-        buscador.fit(X_train, y_train)
-        modelo = buscador.best_estimator_
-        logger.info("%s: mejores hiperparámetros %s", nombre, buscador.best_params_)
-
-        pred = modelo.predict(X_test)
-        proba = modelo.predict_proba(X_test)[:, 1]
-        metricas = {
+    metricas_candidatos: dict[str, Any] = {}
+    for nombre, info in ajustados.items():
+        pred = info["modelo"].predict(x_test)
+        proba = info["modelo"].predict_proba(x_test)[:, 1]
+        matriz = confusion_matrix(y_test, pred, labels=[0, 1])
+        metricas_candidatos[nombre] = {
             "accuracy": float(accuracy_score(y_test, pred)),
             "precision": float(precision_score(y_test, pred, zero_division=0)),
             "recall": float(recall_score(y_test, pred, zero_division=0)),
             "f1": float(f1_score(y_test, pred, zero_division=0)),
             "roc_auc": float(roc_auc_score(y_test, proba)),
+            "cv_f1_mean": info["cv_score_mean"],
+            "cv_f1_std": info["cv_score_std"],
+            "best_params": info["best_params"],
+            "confusion_matrix": matriz.astype(int).tolist(),
         }
-        resultados["clasificacion"][nombre] = metricas
-        logger.info(
-            "%s: acc=%.3f | precision=%.3f | recall=%.3f | f1=%.3f | roc_auc=%.3f",
-            nombre, metricas["accuracy"], metricas["precision"],
-            metricas["recall"], metricas["f1"], metricas["roc_auc"],
-        )
 
-        # Priorizamos F1 porque hay desbalance moderado y nos interesa
-        # equilibrar falsos positivos y falsos negativos en la señal de riesgo.
-        if metricas["f1"] > mejor_f1:
-            mejor_f1 = metricas["f1"]
-            mejor_modelo = modelo
-            mejor_nombre = nombre
+    mejor_nombre = max(
+        ajustados,
+        key=lambda nombre: ajustados[nombre]["cv_score_mean"],
+    )
+    modelo_evaluado = ajustados[mejor_nombre]["modelo"]
+    pred_final = modelo_evaluado.predict(x_test)
+    proba_final = modelo_evaluado.predict_proba(x_test)[:, 1]
 
-    logger.info("Mejor modelo de clasificación: %s (F1=%.3f)", mejor_nombre, mejor_f1)
-    resultados["clasificacion"]["mejor_modelo"] = mejor_nombre
-    resultados["clasificacion"]["umbral_finalizacion"] = float(umbral_finalizacion)
-    resultados["clasificacion"]["umbral_sesiones"] = float(umbral_sesiones)
+    # Reajuste de producción con todos los datos, manteniendo los umbrales
+    # aprendidos exclusivamente desde el conjunto train original.
+    y_completo = _crear_etiqueta_riesgo(data, umbral_finalizacion, umbral_sesiones)
+    modelo_produccion = clone(modelo_evaluado)
+    modelo_produccion.fit(data[CLASSIFICATION_FEATURES], y_completo)
 
-    pickle.dump(mejor_modelo, open("models/modelo_clasificacion_riesgo.pkl", "wb"))
-    return mejor_modelo
+    predicciones = pd.DataFrame({
+        ID_COLUMN: test_data[ID_COLUMN].astype("int64"),
+        "valor_real": y_test,
+        "valor_predicho": pred_final.astype(int),
+        "probabilidad_riesgo": proba_final,
+    }).reset_index(drop=True)
+
+    metricas = {
+        **metricas_candidatos,
+        "mejor_modelo": mejor_nombre,
+        "criterio_seleccion": "mayor_cv_f1_mean_en_train",
+        "umbral_finalizacion": umbral_finalizacion,
+        "umbral_sesiones": umbral_sesiones,
+        "origen_umbrales": "solo_conjunto_train",
+        "positivos_train": int(y_train.sum()),
+        "positivos_test": int(y_test.sum()),
+        "n_train": int(len(train_data)),
+        "n_test": int(len(test_data)),
+    }
+    logger.info(
+        "Clasificación seleccionada por CV: %s | test F1=%.3f | AUC=%.3f",
+        mejor_nombre,
+        metricas_candidatos[mejor_nombre]["f1"],
+        metricas_candidatos[mejor_nombre]["roc_auc"],
+    )
+    return ClassificationTrainingResult(modelo_produccion, metricas, predicciones)
+
+
+def entrenar_modelos_supervisados(
+    df_base_limpio: pd.DataFrame,
+    config: Settings = settings,
+    persistir: bool = True,
+) -> SupervisedTrainingResult:
+    data = validar_entrada_supervisada(df_base_limpio)
+    regresion = entrenar_regresion(data, config=config)
+    clasificacion = entrenar_clasificacion(data, config=config)
+    metricas = {
+        "regresion": regresion.metricas,
+        "clasificacion": clasificacion.metricas,
+        "metadata": {
+            "dataset_entrada": "dataset_base_limpio",
+            "n_filas": int(len(data)),
+            "random_state": int(config.random_state),
+            "n_jobs": int(config.n_jobs),
+            "regression_target": REGRESSION_TARGET,
+            "regression_features": REGRESSION_FEATURES,
+            "classification_target": CLASSIFICATION_TARGET,
+            "classification_features": CLASSIFICATION_FEATURES,
+            "classification_target_source_columns": CLASSIFICATION_TARGET_SOURCE_COLUMNS,
+            "seleccion": "solo_validacion_cruzada_en_train",
+            "test": "auditoria_final_sin_seleccion",
+            "production_refit": True,
+        },
+    }
+    resultado = SupervisedTrainingResult(regresion, clasificacion, metricas)
+    if persistir:
+        guardar_resultados_supervisados(resultado, config=config)
+    return resultado
+
+
+def _guardar_pickle_atomico(objeto: Any, ruta: Path) -> None:
+    ruta.parent.mkdir(parents=True, exist_ok=True)
+    temporal = ruta.with_suffix(f"{ruta.suffix}.tmp")
+    try:
+        with temporal.open("wb") as archivo:
+            pickle.dump(objeto, archivo)
+        temporal.replace(ruta)
+    except OSError as exc:
+        if temporal.exists():
+            temporal.unlink()
+        raise ModelTrainingError(f"No fue posible guardar {ruta}: {exc}") from exc
+
+
+def _guardar_json_atomico(contenido: dict[str, Any], ruta: Path) -> None:
+    ruta.parent.mkdir(parents=True, exist_ok=True)
+    temporal = ruta.with_suffix(f"{ruta.suffix}.tmp")
+    try:
+        with temporal.open("w", encoding="utf-8") as archivo:
+            json.dump(contenido, archivo, indent=4, ensure_ascii=False)
+        temporal.replace(ruta)
+    except OSError as exc:
+        if temporal.exists():
+            temporal.unlink()
+        raise ModelTrainingError(f"No fue posible guardar {ruta}: {exc}") from exc
+
+
+def _guardar_csv_atomico(df: pd.DataFrame, ruta: Path) -> None:
+    ruta.parent.mkdir(parents=True, exist_ok=True)
+    temporal = ruta.with_suffix(f"{ruta.suffix}.tmp")
+    try:
+        df.to_csv(temporal, index=False)
+        temporal.replace(ruta)
+    except OSError as exc:
+        if temporal.exists():
+            temporal.unlink()
+        raise ModelTrainingError(f"No fue posible guardar {ruta}: {exc}") from exc
+
+
+def guardar_resultados_supervisados(
+    resultado: SupervisedTrainingResult,
+    config: Settings = settings,
+) -> None:
+    config.create_directories()
+    _guardar_pickle_atomico(
+        resultado.regresion.modelo,
+        config.models_dir / "modelo_regresion_gasto.pkl",
+    )
+    _guardar_pickle_atomico(
+        resultado.clasificacion.modelo,
+        config.models_dir / "modelo_clasificacion_riesgo.pkl",
+    )
+    _guardar_json_atomico(
+        resultado.metricas,
+        config.models_dir / "metricas_supervisado.json",
+    )
+    _guardar_csv_atomico(
+        resultado.regresion.predicciones_test,
+        config.data_dir / "predicciones_regresion_test.csv",
+    )
+    _guardar_csv_atomico(
+        resultado.clasificacion.predicciones_test,
+        config.data_dir / "predicciones_clasificacion_test.csv",
+    )
+
+
+def main() -> None:
+    config = settings
+    config.create_directories()
+    dataset = cargar_dataset_base(config=config)
+    resultado = entrenar_modelos_supervisados(dataset, config=config, persistir=True)
+    reg = resultado.metricas["regresion"]
+    clf = resultado.metricas["clasificacion"]
+    mejor_reg = reg["mejor_modelo"]
+    mejor_clf = clf["mejor_modelo"]
+    print(
+        "Modelos supervisados completados | "
+        f"Regresión={mejor_reg} (CV R²={reg[mejor_reg]['cv_r2_mean']:.3f}, "
+        f"test R²={reg[mejor_reg]['r2']:.3f}) | "
+        f"Clasificación={mejor_clf} (CV F1={clf[mejor_clf]['cv_f1_mean']:.3f}, "
+        f"test F1={clf[mejor_clf]['f1']:.3f})"
+    )
 
 
 if __name__ == "__main__":
-    entrenar_regresion(data)
-    entrenar_clasificacion(data)
-
-    with open("models/metricas_supervisado.json", "w") as f:
-        json.dump(resultados, f, indent=4, ensure_ascii=False)
-
-    logger.info("Modelos supervisados y métricas guardados en /models")
+    main()

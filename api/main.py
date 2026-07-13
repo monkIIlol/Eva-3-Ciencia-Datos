@@ -462,3 +462,38 @@ def predict_riesgo(datos: ClassificationInput) -> ClassificationResponse:
         riesgo_bajo_compromiso=riesgo,
         probabilidad=round(probabilidad_finita, 3),
     )
+
+
+@app.get("/kpis-negocio")
+def obtener_kpis_negocio() -> dict[str, Any]:
+    """Devuelve los KPIs de negocio generados por el pipeline."""
+    ruta = settings.data_dir / "kpis_negocio.csv"
+
+    try:
+        kpis = pd.read_csv(ruta)
+    except Exception as exc:
+        logger.exception("No fue posible leer los KPIs de negocio.")
+        raise HTTPException(
+            status_code=503,
+            detail="Los KPIs de negocio no están disponibles. Ejecuta el pipeline.",
+        ) from exc
+
+    return {
+        "kpis": kpis.to_dict(orient="records"),
+        "total_filas": len(kpis),
+    }
+
+
+@app.get("/reporte-calidad")
+def obtener_reporte_calidad() -> dict[str, Any]:
+    """Devuelve el reporte de calidad generado por el pipeline."""
+    ruta = settings.data_dir / "reporte_calidad.json"
+
+    try:
+        return _cargar_json(ruta)
+    except Exception as exc:
+        logger.exception("No fue posible leer el reporte de calidad.")
+        raise HTTPException(
+            status_code=503,
+            detail="El reporte de calidad no está disponible. Ejecuta el pipeline.",
+        ) from exc

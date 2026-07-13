@@ -1,13 +1,8 @@
 """
-Pruebas automatizadas para validar las fuentes de datos del proyecto.
+Pruebas del contrato de validación e integración.
 
-Estas pruebas revisan que:
-- los archivos existan;
-- tengan las columnas esperadas;
-- no tengan valores nulos;
-- no tengan id_cliente duplicados;
-- los id_cliente coincidan entre ambas fuentes;
-- el dataset integrado se pueda construir correctamente.
+Estas pruebas utilizan archivos locales como fixtures controladas.
+El flujo productivo continúa extrayendo los perfiles desde PostgreSQL.
 """
 
 import unittest
@@ -15,78 +10,203 @@ from pathlib import Path
 
 import pandas as pd
 
-from etl.validate import (
-    COLUMNAS_STREAMING,
-    COLUMNAS_PERFIL,
-    cargar_csv,
-    validar_columnas,
-    validar_nulos,
-    validar_duplicados_id,
-    validar_tipos_numericos,
-    validar_integracion,
-    ejecutar_validaciones,
+from etl.contracts import (
+    BASE_COLUMN_ORDER,
+    DataIntegrationError,
 )
+from etl.integrate import integrar_fuentes
+from etl.validate import validar_fuentes
 
 
 class TestValidacionDatos(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.ruta_streaming = Path("data/usuarios_streaming.csv")
-        cls.ruta_perfil = Path("database/perfil_usuarios.csv")
+        cls.ruta_streaming = Path(
+            "data/usuarios_streaming.csv"
+        )
+        cls.ruta_perfil = Path(
+            "database/perfil_usuarios.csv"
+        )
 
-        cls.df_streaming = pd.read_csv(cls.ruta_streaming)
-        cls.df_perfil = pd.read_csv(cls.ruta_perfil)
+        cls.df_streaming = pd.read_csv(
+            cls.ruta_streaming
+        )
+        cls.df_perfil = pd.read_csv(
+            cls.ruta_perfil
+        )
 
-    def test_archivos_existen(self):
-        self.assertTrue(self.ruta_streaming.exists())
-        self.assertTrue(self.ruta_perfil.exists())
+    def test_archivos_fixture_existen(self):
+        self.assertTrue(
+            self.ruta_streaming.exists()
+        )
+        self.assertTrue(
+            self.ruta_perfil.exists()
+        )
 
-    def test_columnas_streaming(self):
-        validar_columnas(
+    def test_fuentes_validas_no_generan_errores(self):
+        reporte = validar_fuentes(
             self.df_streaming,
-            COLUMNAS_STREAMING,
-            "usuarios_streaming.csv"
-        )
-
-    def test_columnas_perfil(self):
-        validar_columnas(
             self.df_perfil,
-            COLUMNAS_PERFIL,
-            "perfil_usuarios.csv"
         )
 
-    def test_no_hay_nulos(self):
-        validar_nulos(self.df_streaming, "usuarios_streaming.csv")
-        validar_nulos(self.df_perfil, "perfil_usuarios.csv")
+        self.assertTrue(reporte.is_valid)
+        self.assertEqual(len(reporte.errors), 0)
 
-    def test_no_hay_id_cliente_duplicados(self):
-        validar_duplicados_id(self.df_streaming, "usuarios_streaming.csv")
-        validar_duplicados_id(self.df_perfil, "perfil_usuarios.csv")
+    def test_columna_requerida_faltante_es_error(self):
+        streaming_invalido = (
+            self.df_streaming.drop(
+                columns=["gasto_mensual"]
+            )
+        )
 
-    def test_tipos_numericos(self):
-        validar_tipos_numericos(
+        reporte = validar_fuentes(
+            streaming_invalido,
+            self.df_perfil,
+        )
+
+        codigos = [
+            error.code
+            for error in reporte.errors
+        ]
+
+        self.assertFalse(reporte.is_valid)
+        self.assertIn(
+            "MISSING_REQUIRED_COLUMNS",
+            codigos,
+        )
+
+    def test_nulo_analitico_es_advertencia(self):
+        streaming_con_nulo = (
+            self.df_streaming.copy()
+        )
+
+        streaming_con_nulo.loc[
+            0,
+            "gasto_mensual",
+        ] = None
+
+        reporte = validar_fuentes(
+            streaming_con_nulo,
+            self.df_perfil,
+        )
+
+        codigos_warning = [
+            warning.code
+            for warning in reporte.warnings
+        ]
+
+        self.assertTrue(reporte.is_valid)
+        self.assertIn(
+            "NULL_VALUES",
+            codigos_warning,
+        )
+
+    def test_id_duplicado_es_error(self):
+        perfil_duplicado = pd.concat(
+            [
+                self.df_perfil,
+                self.df_perfil.iloc[[0]],
+            ],
+            ignore_index=True,
+        )
+
+        reporte = validar_fuentes(
             self.df_streaming,
-            COLUMNAS_STREAMING,
-            "usuarios_streaming.csv"
+            perfil_duplicado,
         )
 
-        validar_tipos_numericos(
+        codigos = [
+            error.code
+            for error in reporte.errors
+        ]
+
+        self.assertFalse(reporte.is_valid)
+        self.assertIn(
+            "DUPLICATED_CUSTOMER_ID",
+            codigos,
+        )
+
+    def test_ids_incompatibles_generan_error(self):
+        perfil_incompatible = (
+            self.df_perfil.copy()
+        )
+
+        perfil_incompatible.loc[
+            0,
+            "id_cliente",
+        ] = 999999
+
+        reporte = validar_fuentes(
+            self.df_streaming,
+            perfil_incompatible,
+        )
+
+        codigos = [
+            error.code
+            for error in reporte.errors
+        ]
+
+        self.assertFalse(reporte.is_valid)
+        self.assertIn(
+            "CUSTOMER_ID_MISMATCH",
+            codigos,
+        )
+
+    def test_integracion_valida(self):
+        reporte = validar_fuentes(
+            self.df_streaming,
             self.df_perfil,
-            COLUMNAS_PERFIL,
-            "perfil_usuarios.csv"
         )
 
-    def test_integracion_ids(self):
-        validar_integracion(self.df_streaming, self.df_perfil)
+        resultado = integrar_fuentes(
+            df_streaming=self.df_streaming,
+            df_perfil=self.df_perfil,
+            validation_report=reporte,
+        )
 
-    def test_dataset_integrado(self):
-        df_integrado = ejecutar_validaciones()
+        self.assertEqual(
+            resultado.dataframe.shape,
+            (300, 16),
+        )
 
-        self.assertFalse(df_integrado.empty)
-        self.assertIn("id_cliente", df_integrado.columns)
-        self.assertEqual(df_integrado["id_cliente"].duplicated().sum(), 0)
-        self.assertEqual(len(df_integrado), len(self.df_streaming))
+        self.assertEqual(
+            resultado.dataframe.columns.tolist(),
+            BASE_COLUMN_ORDER,
+        )
+
+        self.assertEqual(
+            resultado.dataframe[
+                "id_cliente"
+            ].duplicated().sum(),
+            0,
+        )
+
+        self.assertEqual(
+            resultado.metadata["cardinalidad"],
+            "one_to_one",
+        )
+
+    def test_integracion_rechaza_reporte_invalido(self):
+        streaming_invalido = (
+            self.df_streaming.drop(
+                columns=["gasto_mensual"]
+            )
+        )
+
+        reporte = validar_fuentes(
+            streaming_invalido,
+            self.df_perfil,
+        )
+
+        with self.assertRaises(
+            DataIntegrationError
+        ):
+            integrar_fuentes(
+                df_streaming=streaming_invalido,
+                df_perfil=self.df_perfil,
+                validation_report=reporte,
+            )
 
 
 if __name__ == "__main__":

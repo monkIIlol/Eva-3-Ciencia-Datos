@@ -9,13 +9,34 @@ services:
     ports:
       - "${POSTGRES_PORT}:5432"
     volumes:
-      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql
-      - ./database/perfil_usuarios.csv:/docker-entrypoint-initdb.d/perfil_usuarios.csv
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./database/perfil_usuarios.csv:/docker-entrypoint-initdb.d/perfil_usuarios.csv:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 10
+
+  pipeline:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      RANDOM_STATE: ${RANDOM_STATE:-29}
+      N_JOBS: ${N_JOBS:-1}
+    command: ["python", "-m", "pipeline.run"]
+    volumes:
+      - ./data:/app/data
+      - modelos:/app/models
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
 
   api:
     build:
@@ -25,22 +46,32 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_HOST: ${POSTGRES_HOST}
-      POSTGRES_PORT: ${POSTGRES_PORT}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      RANDOM_STATE: ${RANDOM_STATE:-29}
+      N_JOBS: ${N_JOBS:-1}
+    command: ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
     ports:
       - "8000:8000"
     volumes:
-      - ./data:/app/data
-      - modelos:/app/models
+      - ./data:/app/data:ro
+      - modelos:/app/models:ro
     depends_on:
-      postgres:
-        condition: service_healthy
+      pipeline:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/')"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')",
+        ]
       interval: 10s
       timeout: 5s
       retries: 10
-      start_period: 30s
+      start_period: 15s
+    restart: unless-stopped
 
   dashboard:
     build:
@@ -48,11 +79,10 @@ services:
       dockerfile: docker/Dockerfile.dashboard
     ports:
       - "8501:8501"
-    volumes:
-      - ./dashboards:/app/dashboards
     depends_on:
       api:
         condition: service_healthy
+    restart: unless-stopped
 
 volumes:
   modelos:

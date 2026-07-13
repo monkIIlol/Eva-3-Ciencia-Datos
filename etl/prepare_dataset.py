@@ -1,353 +1,562 @@
 """
-Preparación del dataset analítico para modelos de Machine Learning.
+Preparación del dataset base y del dataset analítico.
 
-Este módulo toma el dataset consolidado generado por el ETL, aplica limpieza,
-transformaciones avanzadas con Pandas, feature engineering y genera archivos
-listos para entrenamiento, análisis de negocio y documentación.
-
-Entradas:
-- data/data_consolidada.csv
-
-Salidas:
-- data/dataset_modelo.csv
-- data/kpis_negocio.csv
-- data/reporte_calidad.json
+Esta etapa puede recibir directamente el DataFrame producido por la
+integración. También conserva compatibilidad con el flujo anterior,
+leyendo data/data_consolidada.csv cuando no se entrega un DataFrame.
 """
 
-from pathlib import Path
+from __future__ import annotations
+
 import json
 import logging
-import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
 
-
-logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO"),
-    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
+from config.settings import Settings, settings
+from etl.contracts import (
+    BASE_COLUMN_ORDER,
+    BASE_REQUIRED_COLUMNS,
+    COLUMN_RANGES,
+    DataQualityError,
+    INTEGER_COLUMNS,
 )
+from etl.validate import validar_dataset_limpio
+
+
 logger = logging.getLogger(__name__)
 
 
-RUTA_ENTRADA = Path("data/data_consolidada.csv")
-RUTA_DATASET_MODELO = Path("data/dataset_modelo.csv")
-RUTA_KPIS = Path("data/kpis_negocio.csv")
-RUTA_REPORTE = Path("data/reporte_calidad.json")
+# Alias conservados para no romper los tests existentes.
+RUTA_ENTRADA = settings.consolidated_dataset
+RUTA_DATASET_BASE = settings.clean_base_dataset
+RUTA_DATASET_ANALITICO = settings.analytical_dataset
+RUTA_DATASET_MODELO = settings.legacy_model_dataset
+RUTA_KPIS = settings.business_kpis
+RUTA_REPORTE = settings.quality_report
 
 
-COLUMNAS_NUMERICAS_ESPERADAS = [
-    "id_cliente",
-    "horas_consumo_mensual",
-    "gasto_mensual",
-    "cantidad_contenidos_vistos",
-    "sesiones_semana",
-    "porcentaje_finalizacion",
-    "tiempo_promedio_sesion_min",
-    "cantidad_generos_consumidos",
-    "porcentaje_uso_promociones",
-    "antiguedad_cliente_meses",
-    "edad",
-    "dispositivos_registrados",
-    "porcentaje_uso_app_movil",
-    "cantidad_perfiles_creados",
-    "interacciones_mensuales_soporte",
-    "distancia_promedio_red_km",
+VARIABLES_DERIVADAS = [
+    "contenidos_por_sesion",
+    "gasto_por_hora",
+    "minutos_totales_estimados",
+    "soporte_por_dispositivo",
+    "generos_por_contenido",
+    "engagement_score",
+    "nivel_engagement",
+    "cliente_antiguo",
+    "uso_promociones_alto",
+    "valor_cliente",
 ]
 
 
-COLUMNAS_IMPUTABLES = [
-    columna for columna in COLUMNAS_NUMERICAS_ESPERADAS
-    if columna != "id_cliente"
-]
+@dataclass
+class PreparationResult:
+    """Productos generados por la etapa de preparación."""
+
+    dataset_base_limpio: pd.DataFrame
+    dataset_analitico: pd.DataFrame
+    kpis: pd.DataFrame
+    reporte_calidad: dict[str, Any]
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
-COLUMNAS_OUTLIERS_IQR = [
-    "horas_consumo_mensual",
-    "gasto_mensual",
-    "cantidad_contenidos_vistos",
-    "sesiones_semana",
-    "tiempo_promedio_sesion_min",
-    "antiguedad_cliente_meses",
-    "distancia_promedio_red_km",
-]
+def cargar_dataset(
+    ruta: str | Path | None = None,
+    config: Settings = settings,
+) -> pd.DataFrame:
+    """Carga el dataset consolidado para compatibilidad con el flujo anterior."""
+    ruta_entrada = (
+        Path(ruta)
+        if ruta is not None
+        else config.consolidated_dataset
+    )
 
-
-def cargar_dataset(ruta: Path = RUTA_ENTRADA) -> pd.DataFrame:
-    """Carga el dataset consolidado generado por el proceso ETL."""
-    if not ruta.exists():
+    if not ruta_entrada.exists():
         raise FileNotFoundError(
-            f"No se encontró {ruta}. Primero se debe ejecutar etl/extract.py."
+            f"No se encontró {ruta_entrada}. "
+            "Primero debe ejecutarse la extracción e integración."
         )
 
-    df = pd.read_csv(ruta)
+    try:
+        df = pd.read_csv(ruta_entrada)
+    except (OSError, pd.errors.ParserError) as exc:
+        raise DataQualityError(
+            f"No fue posible cargar el dataset consolidado: {exc}"
+        ) from exc
+
+    if df.empty:
+        raise DataQualityError(
+            "El dataset consolidado está vacío."
+        )
+
     logger.info(
-        "Dataset consolidado cargado: %s filas, %s columnas",
+        "Dataset consolidado cargado: %s filas, %s columnas.",
         df.shape[0],
         df.shape[1],
     )
+
     return df
 
 
 def validar_columnas_base(df: pd.DataFrame) -> None:
-    """Valida que el dataset tenga las columnas mínimas necesarias."""
-    faltantes = [col for col in COLUMNAS_NUMERICAS_ESPERADAS if col not in df.columns]
-
-    if faltantes:
-        raise ValueError(f"Faltan columnas requeridas para modelado: {faltantes}")
-
-
-def tratar_outliers_iqr(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Trata valores atípicos mediante el método IQR.
-
-    En vez de eliminar registros, aplica winsorización con clip para conservar
-    la cantidad de filas y reducir el impacto de valores extremos.
-    """
-    df = df.copy()
-    reporte_outliers = {}
-
-    for columna in COLUMNAS_OUTLIERS_IQR:
-        q1 = df[columna].quantile(0.25)
-        q3 = df[columna].quantile(0.75)
-        iqr = q3 - q1
-
-        if pd.isna(iqr) or iqr == 0:
-            reporte_outliers[columna] = {
-                "outliers_detectados": 0,
-                "limite_inferior": None,
-                "limite_superior": None,
-            }
-            continue
-
-        limite_inferior = max(0, q1 - 1.5 * iqr)
-        limite_superior = q3 + 1.5 * iqr
-
-        outliers_detectados = int(
-            ((df[columna] < limite_inferior) | (df[columna] > limite_superior)).sum()
-        )
-
-        df[columna] = df[columna].clip(
-            lower=limite_inferior,
-            upper=limite_superior,
-        )
-
-        reporte_outliers[columna] = {
-            "outliers_detectados": outliers_detectados,
-            "limite_inferior": round(float(limite_inferior), 4),
-            "limite_superior": round(float(limite_superior), 4),
-        }
-
-    df.attrs["outliers_iqr"] = reporte_outliers
-    return df
-
-
-def limpiar_dataset(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Limpia el dataset base.
-
-    Reglas principales:
-    - id_cliente no se imputa, porque es un identificador.
-    - Se eliminan registros sin id_cliente.
-    - Se eliminan duplicados por id_cliente.
-    - Se imputan variables numéricas con mediana.
-    - Se corrigen rangos de negocio.
-    - Se tratan outliers mediante IQR.
-    """
-    df = df.copy()
-
-    filas_iniciales = len(df)
-
-    # El ID se trata como identificador, no como variable imputable.
-    df["id_cliente"] = pd.to_numeric(df["id_cliente"], errors="coerce")
-    ids_nulos_eliminados = int(df["id_cliente"].isna().sum())
-    df = df.dropna(subset=["id_cliente"])
-    df["id_cliente"] = df["id_cliente"].astype(int)
-
-    filas_despues_ids = len(df)
-    df = df.drop_duplicates(subset=["id_cliente"], keep="first")
-    duplicados_eliminados = filas_despues_ids - len(df)
-
-    for columna in COLUMNAS_IMPUTABLES:
-        df[columna] = pd.to_numeric(df[columna], errors="coerce")
-
-    df = df.replace([np.inf, -np.inf], np.nan)
-
-    nulos_antes = df[COLUMNAS_NUMERICAS_ESPERADAS].isna().sum().astype(int).to_dict()
-
-    for columna in COLUMNAS_IMPUTABLES:
-        if df[columna].isna().any():
-            mediana = df[columna].median()
-
-            if pd.isna(mediana):
-                mediana = 0
-
-            df[columna] = df[columna].fillna(mediana)
-
-    # Reglas de consistencia y rangos de negocio.
-    df["sesiones_semana"] = df["sesiones_semana"].clip(lower=1)
-    df["horas_consumo_mensual"] = df["horas_consumo_mensual"].clip(lower=0.1)
-    df["gasto_mensual"] = df["gasto_mensual"].clip(lower=0)
-    df["cantidad_contenidos_vistos"] = df["cantidad_contenidos_vistos"].clip(lower=0)
-    df["tiempo_promedio_sesion_min"] = df["tiempo_promedio_sesion_min"].clip(lower=0)
-    df["cantidad_generos_consumidos"] = df["cantidad_generos_consumidos"].clip(lower=0)
-    df["antiguedad_cliente_meses"] = df["antiguedad_cliente_meses"].clip(lower=0)
-    df["edad"] = df["edad"].clip(lower=13, upper=100)
-    df["dispositivos_registrados"] = df["dispositivos_registrados"].clip(lower=1)
-    df["cantidad_perfiles_creados"] = df["cantidad_perfiles_creados"].clip(lower=1)
-    df["interacciones_mensuales_soporte"] = df["interacciones_mensuales_soporte"].clip(lower=0)
-    df["distancia_promedio_red_km"] = df["distancia_promedio_red_km"].clip(lower=0)
-
-    df["porcentaje_finalizacion"] = df["porcentaje_finalizacion"].clip(lower=0, upper=100)
-    df["porcentaje_uso_promociones"] = df["porcentaje_uso_promociones"].clip(lower=0, upper=1)
-    df["porcentaje_uso_app_movil"] = df["porcentaje_uso_app_movil"].clip(lower=0, upper=1)
-
-    df = tratar_outliers_iqr(df)
-
-    if df["id_cliente"].isna().any():
-        raise ValueError("id_cliente contiene valores nulos después de la limpieza.")
-
-    if df["id_cliente"].duplicated().any():
-        raise ValueError("id_cliente contiene duplicados después de la limpieza.")
-
-    df.attrs["filas_iniciales"] = int(filas_iniciales)
-    df.attrs["ids_nulos_eliminados"] = int(ids_nulos_eliminados)
-    df.attrs["duplicados_eliminados"] = int(duplicados_eliminados)
-    df.attrs["nulos_antes"] = nulos_antes
-
-    logger.info(
-        "Limpieza completada. IDs nulos eliminados: %s | Duplicados eliminados: %s",
-        ids_nulos_eliminados,
-        duplicados_eliminados,
+    """Comprueba que el DataFrame contiene el esquema base completo."""
+    faltantes = sorted(
+        BASE_REQUIRED_COLUMNS - set(df.columns)
     )
 
-    return df
+    if faltantes:
+        raise DataQualityError(
+            "Faltan columnas requeridas para la preparación: "
+            f"{faltantes}"
+        )
 
 
-def crear_variables_derivadas(df: pd.DataFrame) -> pd.DataFrame:
+def detectar_outliers_iqr(df: pd.DataFrame) -> dict[str, int]:
     """
-    Crea variables derivadas para enriquecer el análisis y los modelos.
+    Cuenta posibles outliers mediante IQR.
 
-    Estas variables resumen comportamiento de consumo, valor económico,
-    uso de soporte y nivel de compromiso del usuario.
+    Esta función solo diagnostica. No modifica automáticamente valores,
+    porque su tratamiento debe justificarse según cada variable.
     """
-    df = df.copy()
+    resultado: dict[str, int] = {}
 
-    # Se estima el total mensual de sesiones para no mezclar una variable mensual
-    # con una variable semanal.
-    df["sesiones_mes_estimadas"] = df["sesiones_semana"] * 4
+    for columna in BASE_COLUMN_ORDER:
+        if columna == "id_cliente":
+            continue
 
-    df["contenidos_por_sesion"] = (
-        df["cantidad_contenidos_vistos"] / df["sesiones_mes_estimadas"]
-    ).round(3)
+        serie = pd.to_numeric(
+            df[columna],
+            errors="coerce",
+        ).dropna()
 
-    df["gasto_por_hora"] = (
-        df["gasto_mensual"] / df["horas_consumo_mensual"]
-    ).round(3)
+        if serie.empty:
+            resultado[columna] = 0
+            continue
 
-    df["minutos_totales_estimados"] = (
-        df["horas_consumo_mensual"] * 60
+        q1 = serie.quantile(0.25)
+        q3 = serie.quantile(0.75)
+        iqr = q3 - q1
+
+        if iqr == 0:
+            resultado[columna] = 0
+            continue
+
+        limite_inferior = q1 - 1.5 * iqr
+        limite_superior = q3 + 1.5 * iqr
+
+        cantidad = int(
+            (
+                (serie < limite_inferior)
+                | (serie > limite_superior)
+            ).sum()
+        )
+
+        resultado[columna] = cantidad
+
+    return resultado
+
+
+def limpiar_dataset_base(
+    df: pd.DataFrame,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """
+    Limpia las 16 variables originales del dataset.
+
+    Políticas:
+    - elimina registros exactamente duplicados;
+    - nunca imputa id_cliente;
+    - bloquea IDs inválidos o repetidos;
+    - convierte las variables analíticas a número;
+    - reemplaza infinitos;
+    - transforma valores fuera del dominio en nulos;
+    - imputa variables analíticas mediante mediana;
+    - conserva el esquema base oficial.
+    """
+    validar_columnas_base(df)
+
+    original = df[BASE_COLUMN_ORDER].copy()
+
+    filas_iniciales = int(len(original))
+    duplicados_exactos = int(original.duplicated().sum())
+
+    limpio = original.drop_duplicates().copy()
+
+    # El identificador tiene un tratamiento diferente:
+    # no se imputa ni se corrige mediante estadísticas.
+    ids = pd.to_numeric(
+        limpio["id_cliente"],
+        errors="coerce",
+    )
+
+    ids_invalidos = int(ids.isna().sum())
+
+    if ids_invalidos > 0:
+        raise DataQualityError(
+            "No es posible preparar el dataset: "
+            f"existen {ids_invalidos} IDs nulos o no numéricos."
+        )
+
+    ids_no_enteros = int(
+        ((ids % 1) != 0).sum()
+    )
+
+    if ids_no_enteros > 0:
+        raise DataQualityError(
+            "id_cliente contiene valores no enteros."
+        )
+
+    ids_no_positivos = int(
+        (ids <= 0).sum()
+    )
+
+    if ids_no_positivos > 0:
+        raise DataQualityError(
+            "id_cliente contiene valores menores o iguales a cero."
+        )
+
+    limpio["id_cliente"] = ids.astype("int64")
+
+    ids_duplicados = int(
+        limpio["id_cliente"].duplicated().sum()
+    )
+
+    if ids_duplicados > 0:
+        raise DataQualityError(
+            "Existen IDs duplicados con información potencialmente "
+            f"conflictiva: {ids_duplicados}."
+        )
+
+    nulos_antes: dict[str, int] = {}
+    valores_fuera_rango: dict[str, int] = {}
+    valores_imputados: dict[str, int] = {}
+
+    for columna in BASE_COLUMN_ORDER:
+        if columna == "id_cliente":
+            continue
+
+        serie = pd.to_numeric(
+            limpio[columna],
+            errors="coerce",
+        )
+
+        serie = serie.replace(
+            [np.inf, -np.inf],
+            np.nan,
+        )
+
+        nulos_antes[columna] = int(
+            serie.isna().sum()
+        )
+
+        minimo, maximo = COLUMN_RANGES.get(
+            columna,
+            (None, None),
+        )
+
+        mascara_invalida = pd.Series(
+            False,
+            index=serie.index,
+        )
+
+        if minimo is not None:
+            mascara_invalida |= serie < minimo
+
+        if maximo is not None:
+            mascara_invalida |= serie > maximo
+
+        cantidad_fuera_rango = int(
+            mascara_invalida.sum()
+        )
+
+        valores_fuera_rango[columna] = (
+            cantidad_fuera_rango
+        )
+
+        # Los valores imposibles se consideran faltantes,
+        # en lugar de recortarlos artificialmente al límite.
+        serie = serie.mask(mascara_invalida)
+
+        cantidad_a_imputar = int(
+            serie.isna().sum()
+        )
+
+        valores_imputados[columna] = (
+            cantidad_a_imputar
+        )
+
+        if cantidad_a_imputar > 0:
+            mediana = serie.median()
+
+            if pd.isna(mediana):
+                raise DataQualityError(
+                    f"No es posible imputar la columna {columna}: "
+                    "no contiene valores válidos."
+                )
+
+            serie = serie.fillna(mediana)
+
+        limpio[columna] = serie
+
+    # Se restauran tipos enteros solo después de completar la limpieza.
+    for columna in INTEGER_COLUMNS:
+        if columna == "id_cliente":
+            continue
+
+        limpio[columna] = (
+            limpio[columna]
+            .round()
+            .astype("int64")
+        )
+
+    limpio = limpio[BASE_COLUMN_ORDER].copy()
+
+    metadata = {
+        "filas_iniciales": filas_iniciales,
+        "filas_limpias": int(len(limpio)),
+        "duplicados_exactos_eliminados": duplicados_exactos,
+        "nulos_antes": nulos_antes,
+        "valores_fuera_rango": valores_fuera_rango,
+        "valores_imputados": valores_imputados,
+        "outliers_iqr_detectados": detectar_outliers_iqr(
+            limpio
+        ),
+    }
+
+    logger.info(
+        "Limpieza completada: %s filas; "
+        "%s duplicados exactos eliminados.",
+        len(limpio),
+        duplicados_exactos,
+    )
+
+    return limpio, metadata
+
+
+def crear_variables_derivadas(
+    df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Construye las variables analíticas y de negocio."""
+    analitico = df.copy()
+
+    # Conversión aproximada de sesiones semanales a mensuales.
+    sesiones_mensuales_estimadas = (
+        analitico["sesiones_semana"] * 4.345
+    )
+
+    analitico["contenidos_por_sesion"] = (
+        analitico["cantidad_contenidos_vistos"]
+        .div(
+            sesiones_mensuales_estimadas.replace(
+                0,
+                np.nan,
+            )
+        )
+        .fillna(0)
+        .round(3)
+    )
+
+    analitico["gasto_por_hora"] = (
+        analitico["gasto_mensual"]
+        .div(
+            analitico[
+                "horas_consumo_mensual"
+            ].replace(0, np.nan)
+        )
+        .fillna(0)
+        .round(3)
+    )
+
+    # Se conserva por compatibilidad y visualización,
+    # pero no debe entrar junto con horas al entrenamiento.
+    analitico["minutos_totales_estimados"] = (
+        analitico["horas_consumo_mensual"] * 60
     ).round(2)
 
-    df["soporte_por_dispositivo"] = (
-        df["interacciones_mensuales_soporte"] / df["dispositivos_registrados"]
-    ).round(3)
+    analitico["soporte_por_dispositivo"] = (
+        analitico["interacciones_mensuales_soporte"]
+        .div(
+            analitico[
+                "dispositivos_registrados"
+            ].replace(0, np.nan)
+        )
+        .fillna(0)
+        .round(3)
+    )
 
-    df["generos_por_contenido"] = np.where(
-        df["cantidad_contenidos_vistos"] > 0,
-        df["cantidad_generos_consumidos"] / df["cantidad_contenidos_vistos"],
-        0,
-    ).round(3)
+    analitico["generos_por_contenido"] = (
+        analitico["cantidad_generos_consumidos"]
+        .div(
+            analitico[
+                "cantidad_contenidos_vistos"
+            ].replace(0, np.nan)
+        )
+        .fillna(0)
+        .round(3)
+    )
 
-    # Indicador descriptivo relativo.
-    # Usa rankings percentiles para combinar variables con distintas escalas.
-    df["engagement_score"] = (
-        df["horas_consumo_mensual"].rank(pct=True) * 0.30
-        + df["sesiones_semana"].rank(pct=True) * 0.25
-        + df["porcentaje_finalizacion"].rank(pct=True) * 0.25
-        + df["antiguedad_cliente_meses"].rank(pct=True) * 0.20
+    analitico["engagement_score"] = (
+        analitico[
+            "horas_consumo_mensual"
+        ].rank(pct=True) * 0.30
+        + analitico[
+            "sesiones_semana"
+        ].rank(pct=True) * 0.25
+        + analitico[
+            "porcentaje_finalizacion"
+        ].rank(pct=True) * 0.25
+        + analitico[
+            "antiguedad_cliente_meses"
+        ].rank(pct=True) * 0.20
     ).round(4)
 
-    df["nivel_engagement"] = pd.cut(
-        df["engagement_score"],
-        bins=[-0.01, 0.33, 0.66, 1.0],
-        labels=["bajo", "medio", "alto"],
-    ).astype(str)
+    analitico["nivel_engagement"] = (
+        pd.cut(
+            analitico["engagement_score"],
+            bins=[-0.01, 0.33, 0.66, 1.0],
+            labels=["bajo", "medio", "alto"],
+        )
+        .astype("string")
+    )
 
-    df["cliente_antiguo"] = np.where(df["antiguedad_cliente_meses"] >= 36, 1, 0)
-    df["uso_promociones_alto"] = np.where(df["porcentaje_uso_promociones"] >= 0.50, 1, 0)
+    analitico["cliente_antiguo"] = (
+        analitico[
+            "antiguedad_cliente_meses"
+        ] >= 36
+    ).astype("int8")
 
-    df["valor_cliente"] = np.select(
+    analitico["uso_promociones_alto"] = (
+        analitico[
+            "porcentaje_uso_promociones"
+        ] >= 0.50
+    ).astype("int8")
+
+    gasto_q75 = analitico[
+        "gasto_mensual"
+    ].quantile(0.75)
+
+    gasto_q25 = analitico[
+        "gasto_mensual"
+    ].quantile(0.25)
+
+    engagement_q60 = analitico[
+        "engagement_score"
+    ].quantile(0.60)
+
+    engagement_q33 = analitico[
+        "engagement_score"
+    ].quantile(0.33)
+
+    analitico["valor_cliente"] = np.select(
         [
-            (df["gasto_mensual"] >= df["gasto_mensual"].quantile(0.75))
-            & (df["engagement_score"] >= df["engagement_score"].quantile(0.60)),
-            (df["gasto_mensual"] <= df["gasto_mensual"].quantile(0.25))
-            | (df["engagement_score"] <= df["engagement_score"].quantile(0.33)),
+            (
+                analitico["gasto_mensual"] >= gasto_q75
+            )
+            & (
+                analitico[
+                    "engagement_score"
+                ] >= engagement_q60
+            ),
+            (
+                analitico["gasto_mensual"] <= gasto_q25
+            )
+            | (
+                analitico[
+                    "engagement_score"
+                ] <= engagement_q33
+            ),
         ],
-        ["alto_valor", "valor_en_riesgo"],
+        [
+            "alto_valor",
+            "valor_en_riesgo",
+        ],
         default="valor_medio",
     )
 
-    logger.info("Variables derivadas creadas correctamente.")
-    return df
+    logger.info(
+        "Variables derivadas creadas correctamente."
+    )
+
+    return analitico
 
 
-def optimizar_tipos(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Optimiza tipos de datos para reducir memoria.
+def optimizar_tipos(
+    df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Reduce el uso de memoria sin alterar los valores."""
+    optimizado = df.copy()
 
-    Esto es útil como práctica de escalabilidad para datasets de mayor tamaño.
-    """
-    df = df.copy()
+    for columna in optimizado.columns:
+        if columna in {
+            "nivel_engagement",
+            "valor_cliente",
+        }:
+            optimizado[columna] = (
+                optimizado[columna].astype("category")
+            )
+            continue
 
-    columnas_enteras = [
-        "id_cliente",
-        "cantidad_contenidos_vistos",
-        "sesiones_semana",
-        "tiempo_promedio_sesion_min",
-        "cantidad_generos_consumidos",
-        "antiguedad_cliente_meses",
-        "edad",
-        "dispositivos_registrados",
-        "cantidad_perfiles_creados",
-        "interacciones_mensuales_soporte",
-        "cliente_antiguo",
-        "uso_promociones_alto",
-        "sesiones_mes_estimadas",
-    ]
+        if pd.api.types.is_integer_dtype(
+            optimizado[columna]
+        ):
+            optimizado[columna] = pd.to_numeric(
+                optimizado[columna],
+                downcast="integer",
+            )
 
-    for columna in columnas_enteras:
-        if columna in df.columns:
-            df[columna] = pd.to_numeric(df[columna], downcast="integer")
+        elif pd.api.types.is_float_dtype(
+            optimizado[columna]
+        ):
+            optimizado[columna] = pd.to_numeric(
+                optimizado[columna],
+                downcast="float",
+            )
 
-    columnas_float = df.select_dtypes(include=["float64"]).columns
-    for columna in columnas_float:
-        df[columna] = pd.to_numeric(df[columna], downcast="float")
-
-    return df
+    return optimizado
 
 
-def generar_kpis_negocio(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Genera KPIs por nivel de engagement y valor de cliente.
-
-    Usa groupby con múltiples dimensiones y agregaciones.
-    """
+def generar_kpis_negocio(
+    df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Genera KPIs por engagement y valor de cliente."""
     kpis = (
-        df.groupby(["nivel_engagement", "valor_cliente"], observed=False)
+        df.groupby(
+            [
+                "nivel_engagement",
+                "valor_cliente",
+            ],
+            observed=False,
+        )
         .agg(
             usuarios=("id_cliente", "nunique"),
             gasto_promedio=("gasto_mensual", "mean"),
-            consumo_promedio_horas=("horas_consumo_mensual", "mean"),
-            finalizacion_promedio=("porcentaje_finalizacion", "mean"),
-            promociones_promedio=("porcentaje_uso_promociones", "mean"),
-            antiguedad_promedio=("antiguedad_cliente_meses", "mean"),
+            consumo_promedio_horas=(
+                "horas_consumo_mensual",
+                "mean",
+            ),
+            finalizacion_promedio=(
+                "porcentaje_finalizacion",
+                "mean",
+            ),
+            promociones_promedio=(
+                "porcentaje_uso_promociones",
+                "mean",
+            ),
+            antiguedad_promedio=(
+                "antiguedad_cliente_meses",
+                "mean",
+            ),
         )
         .reset_index()
     )
 
-    kpis["porcentaje_usuarios"] = (kpis["usuarios"] / len(df) * 100).round(2)
+    kpis["porcentaje_usuarios"] = (
+        kpis["usuarios"] / len(df) * 100
+    ).round(2)
 
     columnas_promedio = [
         "gasto_promedio",
@@ -356,81 +565,325 @@ def generar_kpis_negocio(df: pd.DataFrame) -> pd.DataFrame:
         "promociones_promedio",
         "antiguedad_promedio",
     ]
-    kpis[columnas_promedio] = kpis[columnas_promedio].round(2)
 
-    logger.info("KPIs de negocio generados: %s filas", len(kpis))
+    kpis[columnas_promedio] = (
+        kpis[columnas_promedio].round(2)
+    )
+
     return kpis
 
 
-def generar_reporte_calidad(df_original: pd.DataFrame, df_final: pd.DataFrame) -> dict:
-    """Genera un reporte resumido de calidad y transformación del dataset."""
-    memoria_original_mb = df_original.memory_usage(deep=True).sum() / 1024**2
-    memoria_final_mb = df_final.memory_usage(deep=True).sum() / 1024**2
+def generar_reporte_calidad(
+    df_original: pd.DataFrame,
+    df_base_limpio: pd.DataFrame,
+    df_analitico: pd.DataFrame,
+    metadata_limpieza: dict[str, Any],
+) -> dict[str, Any]:
+    """Construye el reporte previo y posterior a la preparación."""
+    memoria_original = (
+        df_original[BASE_COLUMN_ORDER]
+        .memory_usage(deep=True)
+        .sum()
+        / 1024**2
+    )
 
-    reporte = {
+    memoria_base_limpia = (
+        df_base_limpio
+        .memory_usage(deep=True)
+        .sum()
+        / 1024**2
+    )
+
+    memoria_analitica = (
+        df_analitico
+        .memory_usage(deep=True)
+        .sum()
+        / 1024**2
+    )
+
+    return {
+        # Claves anteriores conservadas por compatibilidad.
         "filas_originales": int(df_original.shape[0]),
-        "columnas_originales": int(df_original.shape[1]),
-        "filas_finales": int(df_final.shape[0]),
-        "columnas_finales": int(df_final.shape[1]),
-        "ids_nulos_eliminados": int(df_final.attrs.get("ids_nulos_eliminados", 0)),
-        "duplicados_eliminados": int(df_final.attrs.get("duplicados_eliminados", 0)),
-        "nulos_antes_limpieza": df_final.attrs.get("nulos_antes", {}),
-        "nulos_finales": df_final.isna().sum().astype(int).to_dict(),
-        "outliers_iqr": df_final.attrs.get("outliers_iqr", {}),
-        "memoria_original_mb": round(float(memoria_original_mb), 4),
-        "memoria_final_mb": round(float(memoria_final_mb), 4),
-        "variables_derivadas": [
-            "sesiones_mes_estimadas",
-            "contenidos_por_sesion",
-            "gasto_por_hora",
-            "minutos_totales_estimados",
-            "soporte_por_dispositivo",
-            "generos_por_contenido",
-            "engagement_score",
-            "nivel_engagement",
-            "cliente_antiguo",
-            "uso_promociones_alto",
-            "valor_cliente",
-        ],
-        "nota_metodologica": (
-            "id_cliente se trata como identificador y no se imputa. "
-            "Los outliers se tratan mediante IQR con winsorización para conservar registros."
+        "columnas_originales": int(
+            df_original.shape[1]
         ),
+        "filas_finales": int(
+            df_analitico.shape[0]
+        ),
+        "columnas_finales": int(
+            df_analitico.shape[1]
+        ),
+        "variables_derivadas": VARIABLES_DERIVADAS,
+
+        # Reporte ampliado.
+        "dataset_base_limpio": {
+            "filas": int(df_base_limpio.shape[0]),
+            "columnas": int(
+                df_base_limpio.shape[1]
+            ),
+            "nulos": (
+                df_base_limpio
+                .isna()
+                .sum()
+                .astype(int)
+                .to_dict()
+            ),
+        },
+        "dataset_analitico": {
+            "filas": int(df_analitico.shape[0]),
+            "columnas": int(
+                df_analitico.shape[1]
+            ),
+            "nulos": (
+                df_analitico
+                .isna()
+                .sum()
+                .astype(int)
+                .to_dict()
+            ),
+        },
+        "limpieza": metadata_limpieza,
+        "memoria_mb": {
+            "original_16_columnas": round(
+                float(memoria_original),
+                4,
+            ),
+            "base_limpia_16_columnas": round(
+                float(memoria_base_limpia),
+                4,
+            ),
+            "dataset_analitico": round(
+                float(memoria_analitica),
+                4,
+            ),
+        },
     }
 
-    return reporte
+
+def _guardar_csv_atomico(
+    df: pd.DataFrame,
+    ruta: Path,
+) -> None:
+    """Guarda un CSV sin reemplazar el anterior hasta finalizar."""
+    ruta.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    temporal = ruta.with_suffix(
+        f"{ruta.suffix}.tmp"
+    )
+
+    try:
+        df.to_csv(
+            temporal,
+            index=False,
+        )
+        temporal.replace(ruta)
+
+    except OSError as exc:
+        if temporal.exists():
+            temporal.unlink()
+
+        raise DataQualityError(
+            f"No fue posible guardar {ruta}: {exc}"
+        ) from exc
 
 
-def preparar_dataset() -> pd.DataFrame:
-    """Ejecuta el flujo completo de preparación del dataset analítico."""
-    df_original = cargar_dataset()
-    validar_columnas_base(df_original)
+def _guardar_json_atomico(
+    contenido: dict[str, Any],
+    ruta: Path,
+) -> None:
+    """Guarda un JSON mediante archivo temporal."""
+    ruta.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
-    df_limpio = limpiar_dataset(df_original)
-    df_preparado = crear_variables_derivadas(df_limpio)
-    df_preparado = optimizar_tipos(df_preparado)
+    temporal = ruta.with_suffix(
+        f"{ruta.suffix}.tmp"
+    )
 
-    # Mantener atributos para el reporte después de copiar/optimizar el DataFrame.
-    for clave, valor in df_limpio.attrs.items():
-        df_preparado.attrs[clave] = valor
+    try:
+        with temporal.open(
+            "w",
+            encoding="utf-8",
+        ) as archivo:
+            json.dump(
+                contenido,
+                archivo,
+                indent=4,
+                ensure_ascii=False,
+            )
 
-    kpis = generar_kpis_negocio(df_preparado)
-    reporte = generar_reporte_calidad(df_original, df_preparado)
+        temporal.replace(ruta)
 
-    RUTA_DATASET_MODELO.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        if temporal.exists():
+            temporal.unlink()
 
-    df_preparado.to_csv(RUTA_DATASET_MODELO, index=False)
-    kpis.to_csv(RUTA_KPIS, index=False)
+        raise DataQualityError(
+            f"No fue posible guardar {ruta}: {exc}"
+        ) from exc
 
-    with open(RUTA_REPORTE, "w", encoding="utf-8") as archivo:
-        json.dump(reporte, archivo, indent=4, ensure_ascii=False)
 
-    logger.info("Dataset de modelado guardado en %s", RUTA_DATASET_MODELO)
-    logger.info("KPIs de negocio guardados en %s", RUTA_KPIS)
-    logger.info("Reporte de calidad guardado en %s", RUTA_REPORTE)
+def guardar_resultados(
+    resultado: PreparationResult,
+    config: Settings = settings,
+) -> None:
+    """Persiste todos los productos de una preparación válida."""
+    _guardar_csv_atomico(
+        resultado.dataset_base_limpio,
+        config.clean_base_dataset,
+    )
 
-    return df_preparado
+    _guardar_csv_atomico(
+        resultado.dataset_analitico,
+        config.analytical_dataset,
+    )
+
+    # Archivo temporal de compatibilidad con módulos y tests anteriores.
+    _guardar_csv_atomico(
+        resultado.dataset_analitico,
+        config.legacy_model_dataset,
+    )
+
+    _guardar_csv_atomico(
+        resultado.kpis,
+        config.business_kpis,
+    )
+
+    _guardar_json_atomico(
+        resultado.reporte_calidad,
+        config.quality_report,
+    )
+
+
+def preparar_desde_dataframe(
+    df_integrado: pd.DataFrame,
+    config: Settings = settings,
+    persistir: bool = True,
+) -> PreparationResult:
+    """
+    Recibe directamente la salida de integración y genera los productos.
+
+    Esta es la función que utilizará posteriormente el orquestador.
+    """
+    if not isinstance(
+        df_integrado,
+        pd.DataFrame,
+    ):
+        raise DataQualityError(
+            "La preparación requiere un DataFrame integrado."
+        )
+
+    df_original = df_integrado.copy()
+
+    df_limpio, metadata_limpieza = (
+        limpiar_dataset_base(df_original)
+    )
+
+    # Garantía posterior: ninguna etapa de modelado puede recibir
+    # el dataset si la limpieza no cumplió el contrato.
+    reporte_validacion = validar_dataset_limpio(
+        df_limpio
+    )
+
+    reporte_validacion.raise_if_invalid()
+
+    df_limpio = optimizar_tipos(
+        df_limpio
+    )
+
+    df_analitico = crear_variables_derivadas(
+        df_limpio
+    )
+
+    df_analitico = optimizar_tipos(
+        df_analitico
+    )
+
+    kpis = generar_kpis_negocio(
+        df_analitico
+    )
+
+    reporte = generar_reporte_calidad(
+        df_original=df_original,
+        df_base_limpio=df_limpio,
+        df_analitico=df_analitico,
+        metadata_limpieza=metadata_limpieza,
+    )
+
+    resultado = PreparationResult(
+        dataset_base_limpio=df_limpio,
+        dataset_analitico=df_analitico,
+        kpis=kpis,
+        reporte_calidad=reporte,
+        metadata={
+            "validacion_post_limpieza": {
+                "is_valid": (
+                    reporte_validacion.is_valid
+                ),
+                "errors": len(
+                    reporte_validacion.errors
+                ),
+                "warnings": len(
+                    reporte_validacion.warnings
+                ),
+            }
+        },
+    )
+
+    if persistir:
+        guardar_resultados(
+            resultado,
+            config=config,
+        )
+
+    return resultado
+
+
+def preparar_dataset(
+    df_integrado: pd.DataFrame | None = None,
+    config: Settings = settings,
+    persistir: bool = True,
+) -> pd.DataFrame:
+    """
+    Wrapper compatible con el uso anterior.
+
+    Cuando no recibe un DataFrame, lee data_consolidada.csv.
+    Retorna el dataset analítico para no romper tests existentes.
+    """
+    if df_integrado is None:
+        df_integrado = cargar_dataset(
+            config=config
+        )
+
+    resultado = preparar_desde_dataframe(
+        df_integrado=df_integrado,
+        config=config,
+        persistir=persistir,
+    )
+
+    return resultado.dataset_analitico
+
+
+def main() -> None:
+    """Ejecuta la preparación usando el consolidado existente."""
+    resultado = preparar_desde_dataframe(
+        df_integrado=cargar_dataset(),
+        persistir=True,
+    )
+
+    print(
+        "Preparación completada | "
+        f"Base limpia: "
+        f"{resultado.dataset_base_limpio.shape} | "
+        f"Analítico: "
+        f"{resultado.dataset_analitico.shape} | "
+        f"KPIs: {resultado.kpis.shape}"
+    )
 
 
 if __name__ == "__main__":
-    preparar_dataset()
+    main()

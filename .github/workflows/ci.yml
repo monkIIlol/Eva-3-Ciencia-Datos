@@ -1,8 +1,5 @@
 name: CI
 
-# Se ejecuta en cada push y pull request hacia main, para validar que el
-# pipeline de datos, los modelos y la API sigan funcionando antes de
-# integrar cambios.
 on:
   push:
     branches: [main]
@@ -14,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Descargar el código
+      - name: Descargar código
         uses: actions/checkout@v4
 
       - name: Configurar Python
@@ -26,41 +23,36 @@ jobs:
       - name: Instalar dependencias
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pytest httpx
+          python -m pip install -r requirements-dev.txt
 
-      - name: Validar las fuentes de datos (ETL)
-        run: python etl/validate.py
-
-      - name: Generar dataset consolidado
-    
+      - name: Compilar módulos
         run: |
-          python -c "
-          import pandas as pd
-          s = pd.read_csv('data/usuarios_streaming.csv')
-          p = pd.read_csv('database/perfil_usuarios.csv')
-          s.merge(p, on='id_cliente').to_csv('data/data_consolidada.csv', index=False)
-          "
+          python -m compileall -f config etl model api pipeline tests
 
-      - name: Entrenar modelo de segmentación (KMeans)
-        run: python model/train.py
+      - name: Ejecutar pruebas automatizadas
+        run: |
+          python -m unittest discover -s tests -p "test_*.py" -v
 
-      - name: Entrenar modelos supervisados (regresión y clasificación)
-        run: python model/train_supervisado.py
-
-      - name: Correr tests automatizados
-        run: python -m unittest discover -s tests -p "test_*.py" -v
+      - name: Validar configuración de Docker Compose
+        run: |
+          docker compose config
 
   docker-build:
     runs-on: ubuntu-latest
     needs: tests
 
     steps:
-      - name: Descargar el código
+      - name: Descargar código
         uses: actions/checkout@v4
 
+      - name: Construir imagen del pipeline
+        run: |
+          docker build -f docker/Dockerfile.api -t streaming-pipeline:ci .
+
       - name: Construir imagen de la API
-        run: docker build -f docker/Dockerfile.api -t streaming-api:ci .
+        run: |
+          docker build -f docker/Dockerfile.api -t streaming-api:ci .
 
       - name: Construir imagen del dashboard
-        run: docker build -f docker/Dockerfile.dashboard -t streaming-dashboard:ci .
+        run: |
+          docker build -f docker/Dockerfile.dashboard -t streaming-dashboard:ci .

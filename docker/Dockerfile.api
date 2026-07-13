@@ -1,17 +1,24 @@
-FROM python:3.11
+FROM python:3.11-slim
 
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install -r requirements.txt
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app \
+    PIP_NO_CACHE_DIR=1
 
+COPY requirements.txt ./requirements.txt
+RUN python -m pip install --upgrade pip \
+    && python -m pip install -r requirements.txt
+
+COPY config/ ./config/
 COPY etl/ ./etl/
 COPY model/ ./model/
+COPY pipeline/ ./pipeline/
 COPY api/ ./api/
+
+RUN mkdir -p /app/data /app/models
 
 EXPOSE 8000
 
-CMD python etl/extract.py && \
-    python model/train.py && \
-    python model/train_supervisado.py && \
-    uvicorn api.main:app --host 0.0.0.0 --port 8000
+CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]

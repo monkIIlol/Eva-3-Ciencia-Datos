@@ -1,153 +1,619 @@
 """
-Validación de fuentes de datos para el pipeline ETL.
+Validación estructural y de calidad previa de las fuentes.
 
-Este script revisa:
-- columnas esperadas;
-- valores nulos;
-- id_cliente duplicados;
-- tipos numéricos;
-- consistencia de id_cliente entre fuentes;
-- correcta integración entre usuarios_streaming y perfil_usuarios.
+Este módulo no vuelve a leer archivos ni consulta PostgreSQL.
+Recibe directamente los DataFrames producidos por la extracción.
+
+Errores estructurales:
+    Detienen el pipeline.
+
+Problemas de calidad corregibles:
+    Se registran como advertencias para la etapa de limpieza.
 """
 
-import pandas as pd
-from pathlib import Path
-import os
-import logging
+from __future__ import annotations
 
-logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO"),
-    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
+import logging
+from typing import Collection
+
+import numpy as np
+import pandas as pd
+
+from etl.contracts import (
+    PROFILE_REQUIRED_COLUMNS,
+    STREAMING_REQUIRED_COLUMNS,
+    ValidationReport,
+    BASE_COLUMN_ORDER,
+    BASE_REQUIRED_COLUMNS,
+    COLUMN_RANGES,
+    INTEGER_COLUMNS,
 )
+
+
 logger = logging.getLogger(__name__)
 
 
-COLUMNAS_STREAMING = [
-    "id_cliente",
-    "horas_consumo_mensual",
-    "gasto_mensual",
-    "cantidad_contenidos_vistos",
-    "sesiones_semana",
-    "porcentaje_finalizacion",
-    "tiempo_promedio_sesion_min",
-    "cantidad_generos_consumidos",
-    "porcentaje_uso_promociones",
-    "antiguedad_cliente_meses",
-]
+def validar_fuente(
+    df: pd.DataFrame,
+    columnas_requeridas: Collection[str],
+    nombre_fuente: str,
+) -> ValidationReport:
+    """
+    Valida la estructura de una fuente antes de su integración.
 
-COLUMNAS_PERFIL = [
-    "id_cliente",
-    "edad",
-    "dispositivos_registrados",
-    "porcentaje_uso_app_movil",
-    "cantidad_perfiles_creados",
-    "interacciones_mensuales_soporte",
-    "distancia_promedio_red_km",
-]
+    Los problemas que imposibilitan identificar o integrar registros
+    se consideran errores. Los datos analíticos potencialmente
+    corregibles se registran como advertencias.
 
+    Parameters
+    ----------
+    df:
+        DataFrame extraído desde la fuente real.
+    columnas_requeridas:
+        Columnas mínimas exigidas por el contrato.
+    nombre_fuente:
+        Nombre utilizado en reportes y mensajes.
 
-def cargar_csv(ruta):
-    ruta = Path(ruta)
+    Returns
+    -------
+    ValidationReport
+        Resultado estructurado de la validación.
+    """
+    report = ValidationReport(
+        stage=f"estructura_{nombre_fuente}",
+        metadata={
+            "fuente": nombre_fuente,
+        },
+    )
 
-    if not ruta.exists():
-        raise FileNotFoundError(f"No se encontró el archivo: {ruta}")
+    if not isinstance(df, pd.DataFrame):
+        report.add_error(
+            code="INVALID_SOURCE_TYPE",
+            message=(
+                f"La fuente {nombre_fuente} no fue entregada "
+                "como DataFrame."
+            ),
+            received_type=type(df).__name__,
+        )
+        return report
 
-    return pd.read_csv(ruta)
+    report.metadata.update(
+        {
+            "filas": int(df.shape[0]),
+            "columnas": int(df.shape[1]),
+        }
+    )
 
+    if df.empty:
+        report.add_error(
+            code="EMPTY_SOURCE",
+            message=f"La fuente {nombre_fuente} no contiene registros.",
+        )
+        return report
 
-def validar_columnas(df, columnas_esperadas, nombre_fuente):
-    columnas_faltantes = [col for col in columnas_esperadas if col not in df.columns]
+    columnas_requeridas = set(columnas_requeridas)
+    columnas_actuales = set(df.columns)
 
-    if columnas_faltantes:
-        raise ValueError(
-            f"La fuente {nombre_fuente} no tiene estas columnas: {columnas_faltantes}"
+    faltantes = sorted(columnas_requeridas - columnas_actuales)
+    adicionales = sorted(columnas_actuales - columnas_requeridas)
+
+    if faltantes:
+        report.add_error(
+            code="MISSING_REQUIRED_COLUMNS",
+            message=(
+                f"La fuente {nombre_fuente} no contiene todas "
+                "las columnas requeridas."
+            ),
+            missing_columns=faltantes,
         )
 
-    logger.info(f"[OK] {nombre_fuente}: columnas esperadas encontradas.")
-
-
-def validar_nulos(df, nombre_fuente):
-    nulos = df.isnull().sum()
-    columnas_con_nulos = nulos[nulos > 0]
-
-    if not columnas_con_nulos.empty:
-        raise ValueError(
-            f"La fuente {nombre_fuente} tiene valores nulos:\n{columnas_con_nulos}"
+    if adicionales:
+        report.add_warning(
+            code="UNEXPECTED_COLUMNS",
+            message=(
+                f"La fuente {nombre_fuente} contiene columnas "
+                "adicionales no contempladas por el contrato."
+            ),
+            additional_columns=adicionales,
         )
 
-    logger.info(f"[OK] {nombre_fuente}: no contiene valores nulos.")
+    # Sin el identificador no pueden ejecutarse las comprobaciones
+    # de unicidad y compatibilidad.
+    if "id_cliente" not in df.columns:
+        return report
 
+    ids_numericos = pd.to_numeric(
+        df["id_cliente"],
+        errors="coerce",
+    )
 
-def validar_duplicados_id(df, nombre_fuente):
-    duplicados = df["id_cliente"].duplicated().sum()
+    ids_invalidos = int(ids_numericos.isna().sum())
+
+    if ids_invalidos > 0:
+        report.add_error(
+            code="INVALID_CUSTOMER_ID",
+            message=(
+                f"La fuente {nombre_fuente} contiene identificadores "
+                "nulos o no convertibles a número."
+            ),
+            column="id_cliente",
+            invalid_count=ids_invalidos,
+        )
+
+    ids_no_positivos = int(
+        (ids_numericos.dropna() <= 0).sum()
+    )
+
+    if ids_no_positivos > 0:
+        report.add_error(
+            code="NON_POSITIVE_CUSTOMER_ID",
+            message=(
+                f"La fuente {nombre_fuente} contiene identificadores "
+                "menores o iguales a cero."
+            ),
+            column="id_cliente",
+            invalid_count=ids_no_positivos,
+        )
+
+    duplicados = int(
+        ids_numericos.dropna().duplicated().sum()
+    )
 
     if duplicados > 0:
-        raise ValueError(
-            f"La fuente {nombre_fuente} tiene {duplicados} id_cliente duplicados."
+        report.add_error(
+            code="DUPLICATED_CUSTOMER_ID",
+            message=(
+                f"La fuente {nombre_fuente} contiene identificadores "
+                "duplicados."
+            ),
+            column="id_cliente",
+            duplicated_count=duplicados,
         )
 
-    logger.info(f"[OK] {nombre_fuente}: no tiene id_cliente duplicados.")
+    # Estas comprobaciones solo se realizan sobre columnas presentes.
+    columnas_disponibles = sorted(
+        columnas_requeridas.intersection(columnas_actuales)
+    )
 
+    for columna in columnas_disponibles:
+        if columna == "id_cliente":
+            continue
 
-def validar_tipos_numericos(df, columnas_esperadas, nombre_fuente):
-    for columna in columnas_esperadas:
-        if not pd.api.types.is_numeric_dtype(df[columna]):
-            raise TypeError(
-                f"La columna {columna} de {nombre_fuente} no es numérica."
+        serie = df[columna]
+
+        cantidad_nulos = int(serie.isna().sum())
+
+        if cantidad_nulos > 0:
+            report.add_warning(
+                code="NULL_VALUES",
+                message=(
+                    f"La columna {columna} de {nombre_fuente} "
+                    "contiene valores nulos que deberán tratarse."
+                ),
+                column=columna,
+                null_count=cantidad_nulos,
             )
 
-    logger.info(f"[OK] {nombre_fuente}: todas las columnas esperadas son numéricas.")
+        if not pd.api.types.is_numeric_dtype(serie):
+            conversion = pd.to_numeric(
+                serie,
+                errors="coerce",
+            )
 
+            no_convertibles = int(
+                conversion.isna().sum() - serie.isna().sum()
+            )
 
-def validar_integracion(df_streaming, df_perfil):
-    ids_streaming = set(df_streaming["id_cliente"])
-    ids_perfil = set(df_perfil["id_cliente"])
+            if no_convertibles > 0:
+                report.add_warning(
+                    code="NON_NUMERIC_VALUES",
+                    message=(
+                        f"La columna {columna} de {nombre_fuente} "
+                        "contiene valores no convertibles a número."
+                    ),
+                    column=columna,
+                    invalid_count=no_convertibles,
+                )
+            else:
+                report.add_warning(
+                    code="CONVERTIBLE_NUMERIC_TYPE",
+                    message=(
+                        f"La columna {columna} de {nombre_fuente} "
+                        "no tiene tipo numérico, pero puede convertirse."
+                    ),
+                    column=columna,
+                    current_dtype=str(serie.dtype),
+                )
 
-    ids_solo_streaming = ids_streaming - ids_perfil
-    ids_solo_perfil = ids_perfil - ids_streaming
+            serie_numerica = conversion
+        else:
+            serie_numerica = serie
 
-    if ids_solo_streaming:
-        raise ValueError(
-            "Existen id_cliente en usuarios_streaming.csv que no están en perfil_usuarios.csv."
+        cantidad_infinitos = int(
+            np.isinf(
+                pd.to_numeric(
+                    serie_numerica,
+                    errors="coerce",
+                )
+            ).sum()
         )
 
-    if ids_solo_perfil:
-        raise ValueError(
-            "Existen id_cliente en perfil_usuarios.csv que no están en usuarios_streaming.csv."
+        if cantidad_infinitos > 0:
+            report.add_warning(
+                code="INFINITE_VALUES",
+                message=(
+                    f"La columna {columna} de {nombre_fuente} "
+                    "contiene valores infinitos."
+                ),
+                column=columna,
+                infinite_count=cantidad_infinitos,
+            )
+
+    logger.info(
+        "Fuente %s validada: %s errores, %s advertencias.",
+        nombre_fuente,
+        len(report.errors),
+        len(report.warnings),
+    )
+
+    return report
+
+
+def validar_compatibilidad_ids(
+    df_streaming: pd.DataFrame,
+    df_perfil: pd.DataFrame,
+) -> ValidationReport:
+    """
+    Verifica que ambas fuentes representen el mismo universo de usuarios.
+
+    Returns
+    -------
+    ValidationReport
+        Reporte de compatibilidad previo a la integración.
+    """
+    report = ValidationReport(
+        stage="compatibilidad_ids",
+    )
+
+    if "id_cliente" not in df_streaming.columns:
+        report.add_error(
+            code="MISSING_STREAMING_ID",
+            message=(
+                "La fuente de streaming no contiene id_cliente."
+            ),
+        )
+        return report
+
+    if "id_cliente" not in df_perfil.columns:
+        report.add_error(
+            code="MISSING_PROFILE_ID",
+            message=(
+                "La fuente de perfiles no contiene id_cliente."
+            ),
+        )
+        return report
+
+    ids_streaming = set(
+        pd.to_numeric(
+            df_streaming["id_cliente"],
+            errors="coerce",
+        ).dropna()
+    )
+
+    ids_perfil = set(
+        pd.to_numeric(
+            df_perfil["id_cliente"],
+            errors="coerce",
+        ).dropna()
+    )
+
+    solo_streaming = sorted(ids_streaming - ids_perfil)
+    solo_perfil = sorted(ids_perfil - ids_streaming)
+
+    report.metadata.update(
+        {
+            "ids_streaming": len(ids_streaming),
+            "ids_perfil": len(ids_perfil),
+            "ids_compartidos": len(
+                ids_streaming.intersection(ids_perfil)
+            ),
+            "ids_solo_streaming": len(solo_streaming),
+            "ids_solo_perfil": len(solo_perfil),
+        }
+    )
+
+    if solo_streaming or solo_perfil:
+        report.add_error(
+            code="CUSTOMER_ID_MISMATCH",
+            message=(
+                "Las fuentes no contienen exactamente el mismo "
+                "conjunto de usuarios."
+            ),
+            only_streaming_count=len(solo_streaming),
+            only_profile_count=len(solo_perfil),
+            only_streaming_sample=solo_streaming[:10],
+            only_profile_sample=solo_perfil[:10],
         )
 
-    logger.info("[OK] Integración: los id_cliente coinciden entre ambas fuentes.")
+    return report
 
 
-def ejecutar_validaciones():
-    logger.info("Iniciando validación del pipeline ETL...\n")
+def validar_fuentes(
+    df_streaming: pd.DataFrame,
+    df_perfil: pd.DataFrame,
+) -> ValidationReport:
+    """
+    Ejecuta todas las validaciones previas a la integración.
 
-    df_streaming = cargar_csv("data/usuarios_streaming.csv")
-    df_perfil = cargar_csv("database/perfil_usuarios.csv")
+    Returns
+    -------
+    ValidationReport
+        Reporte consolidado de ambas fuentes.
+    """
+    streaming_report = validar_fuente(
+        df=df_streaming,
+        columnas_requeridas=STREAMING_REQUIRED_COLUMNS,
+        nombre_fuente="usuarios_streaming",
+    )
 
-    validar_columnas(df_streaming, COLUMNAS_STREAMING, "usuarios_streaming.csv")
-    validar_columnas(df_perfil, COLUMNAS_PERFIL, "perfil_usuarios.csv")
+    perfil_report = validar_fuente(
+        df=df_perfil,
+        columnas_requeridas=PROFILE_REQUIRED_COLUMNS,
+        nombre_fuente="perfil_usuarios_postgresql",
+    )
 
-    validar_nulos(df_streaming, "usuarios_streaming.csv")
-    validar_nulos(df_perfil, "perfil_usuarios.csv")
+    errores_id = {
+        "INVALID_CUSTOMER_ID",
+        "NON_POSITIVE_CUSTOMER_ID",
+        "DUPLICATED_CUSTOMER_ID",
+        "MISSING_STREAMING_ID",
+        "MISSING_PROFILE_ID",
+    }
 
-    validar_duplicados_id(df_streaming, "usuarios_streaming.csv")
-    validar_duplicados_id(df_perfil, "perfil_usuarios.csv")
+    issues_fuentes = (
+        streaming_report.issues
+        + perfil_report.issues
+    )
 
-    validar_tipos_numericos(df_streaming, COLUMNAS_STREAMING, "usuarios_streaming.csv")
-    validar_tipos_numericos(df_perfil, COLUMNAS_PERFIL, "perfil_usuarios.csv")
+    existe_error_id = any(
+        issue.severity == "error"
+        and issue.code in errores_id
+        for issue in issues_fuentes
+    )
 
-    validar_integracion(df_streaming, df_perfil)
+    if existe_error_id:
+        compatibilidad_report = ValidationReport(
+            stage="compatibilidad_ids",
+            metadata={
+                "skipped": True,
+                "reason": (
+                    "La comparación de IDs fue omitida porque "
+                    "alguna fuente contiene identificadores inválidos."
+                ),
+            },
+        )
+    else:
+        compatibilidad_report = validar_compatibilidad_ids(
+            df_streaming,
+            df_perfil,
+        )
 
-    df_integrado = df_streaming.merge(df_perfil, on="id_cliente", how="inner")
+    report = ValidationReport(
+        stage="validacion_estructural_fuentes",
+        metadata={
+            "streaming": streaming_report.metadata,
+            "perfil": perfil_report.metadata,
+            "compatibilidad": compatibilidad_report.metadata,
+        },
+    )
 
-    logger.info("\n[OK] Dataset integrado validado correctamente.")
-    logger.info(f"Filas finales: {df_integrado.shape[0]}")
-    logger.info(f"Columnas finales: {df_integrado.shape[1]}")
+    report.issues.extend(streaming_report.issues)
+    report.issues.extend(perfil_report.issues)
+    report.issues.extend(compatibilidad_report.issues)
 
-    return df_integrado
+    return report
+
+
+def validar_dataset_limpio(
+    df: pd.DataFrame,
+) -> ValidationReport:
+    """
+    Verifica que el dataset base limpio pueda alimentar los modelos.
+
+    Esta validación se ejecuta después de la limpieza. A diferencia de
+    la validación previa, aquí los nulos, infinitos y valores fuera de
+    rango son errores bloqueantes.
+    """
+    report = ValidationReport(
+        stage="calidad_dataset_base_limpio",
+    )
+
+    if not isinstance(df, pd.DataFrame):
+        report.add_error(
+            code="INVALID_CLEAN_DATASET_TYPE",
+            message="El dataset limpio no es un DataFrame.",
+            received_type=type(df).__name__,
+        )
+        return report
+
+    report.metadata.update(
+        {
+            "filas": int(df.shape[0]),
+            "columnas": int(df.shape[1]),
+        }
+    )
+
+    if df.empty:
+        report.add_error(
+            code="EMPTY_CLEAN_DATASET",
+            message="El dataset limpio no contiene registros.",
+        )
+        return report
+
+    columnas_actuales = set(df.columns)
+    faltantes = sorted(BASE_REQUIRED_COLUMNS - columnas_actuales)
+    adicionales = sorted(columnas_actuales - BASE_REQUIRED_COLUMNS)
+
+    if faltantes:
+        report.add_error(
+            code="MISSING_CLEAN_COLUMNS",
+            message="El dataset limpio no contiene todas las columnas base.",
+            missing_columns=faltantes,
+        )
+        return report
+
+    if adicionales:
+        report.add_warning(
+            code="UNEXPECTED_CLEAN_COLUMNS",
+            message="El dataset base limpio contiene columnas adicionales.",
+            additional_columns=adicionales,
+        )
+
+    if list(df.columns) != BASE_COLUMN_ORDER:
+        report.add_warning(
+            code="NON_STANDARD_COLUMN_ORDER",
+            message="Las columnas no siguen el orden oficial del contrato.",
+        )
+
+    ids = pd.to_numeric(df["id_cliente"], errors="coerce")
+
+    if ids.isna().any():
+        report.add_error(
+            code="INVALID_CLEAN_CUSTOMER_ID",
+            message="El dataset limpio contiene IDs nulos o no numéricos.",
+            column="id_cliente",
+            invalid_count=int(ids.isna().sum()),
+        )
+
+    if ids.dropna().duplicated().any():
+        report.add_error(
+            code="DUPLICATED_CLEAN_CUSTOMER_ID",
+            message="El dataset limpio contiene IDs duplicados.",
+            column="id_cliente",
+            duplicated_count=int(ids.dropna().duplicated().sum()),
+        )
+
+    for columna in BASE_COLUMN_ORDER:
+        serie = pd.to_numeric(df[columna], errors="coerce")
+
+        cantidad_invalidos = int(serie.isna().sum())
+
+        if cantidad_invalidos > 0:
+            report.add_error(
+                code="NULL_OR_NON_NUMERIC_AFTER_CLEANING",
+                message=(
+                    f"La columna {columna} conserva valores nulos "
+                    "o no numéricos después de la limpieza."
+                ),
+                column=columna,
+                invalid_count=cantidad_invalidos,
+            )
+            continue
+
+        cantidad_infinitos = int(np.isinf(serie).sum())
+
+        if cantidad_infinitos > 0:
+            report.add_error(
+                code="INFINITE_AFTER_CLEANING",
+                message=(
+                    f"La columna {columna} conserva valores infinitos "
+                    "después de la limpieza."
+                ),
+                column=columna,
+                infinite_count=cantidad_infinitos,
+            )
+
+        minimo, maximo = COLUMN_RANGES.get(
+            columna,
+            (None, None),
+        )
+
+        if minimo is not None:
+            bajo_minimo = int((serie < minimo).sum())
+
+            if bajo_minimo > 0:
+                report.add_error(
+                    code="VALUE_BELOW_MINIMUM",
+                    message=(
+                        f"La columna {columna} contiene valores "
+                        f"menores que {minimo}."
+                    ),
+                    column=columna,
+                    invalid_count=bajo_minimo,
+                    minimum=minimo,
+                )
+
+        if maximo is not None:
+            sobre_maximo = int((serie > maximo).sum())
+
+            if sobre_maximo > 0:
+                report.add_error(
+                    code="VALUE_ABOVE_MAXIMUM",
+                    message=(
+                        f"La columna {columna} contiene valores "
+                        f"mayores que {maximo}."
+                    ),
+                    column=columna,
+                    invalid_count=sobre_maximo,
+                    maximum=maximo,
+                )
+
+        if columna in INTEGER_COLUMNS:
+            no_enteros = int(
+                ((serie % 1) != 0).sum()
+            )
+
+            if no_enteros > 0:
+                report.add_error(
+                    code="NON_INTEGER_VALUE",
+                    message=(
+                        f"La columna {columna} debe contener "
+                        "valores enteros."
+                    ),
+                    column=columna,
+                    invalid_count=no_enteros,
+                )
+
+    return report
+
+
+def main() -> None:
+    """
+    Prueba manual de extracción y validación con las fuentes reales.
+
+    No sustituye todavía al orquestador final.
+    """
+    from etl.extract import extraer_fuentes, integrar
+
+    logger.info("Iniciando validación estructural de fuentes.")
+
+    df_streaming, df_perfil = extraer_fuentes()
+
+    report = validar_fuentes(
+        df_streaming,
+        df_perfil,
+    )
+
+    report.raise_if_invalid()
+
+    df_integrado = integrar(
+        df_streaming,
+        df_perfil,
+    )
+
+    logger.info(
+        "Validación e integración completadas: %s filas, %s columnas.",
+        df_integrado.shape[0],
+        df_integrado.shape[1],
+    )
+
+    print(
+        "Validación estructural correcta | "
+        f"Errores: {len(report.errors)} | "
+        f"Advertencias: {len(report.warnings)} | "
+        f"Dataset integrado: {df_integrado.shape}"
+    )
 
 
 if __name__ == "__main__":
-    ejecutar_validaciones()
+    main()

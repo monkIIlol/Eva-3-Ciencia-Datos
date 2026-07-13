@@ -25,7 +25,17 @@ class TestPrepareDataset(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        """Ejecuta la preparación del dataset una vez antes de las pruebas."""
+        from pathlib import Path
+        import unittest
+
+        ruta_consolidada = Path("data/data_consolidada.csv")
+
+        if not ruta_consolidada.exists():
+            raise unittest.SkipTest(
+                "No existe data/data_consolidada.csv en el entorno de CI. "
+                "Se omiten estas pruebas porque dependen de un artefacto generado por el pipeline."
+            )
+
         cls.df = preparar_dataset()
 
     def test_archivos_generados(self):

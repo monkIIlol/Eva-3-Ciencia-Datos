@@ -1,12 +1,40 @@
-data/data_consolidada.csv
-data/usuarios_segmentados.csv
-data/centroides.csv
-data/evaluacion_k.csv
+# Archivos generados por el pipeline
+data/*
+!data/.gitkeep
+!data/usuarios_streaming.csv
 
+
+# Python
 __pycache__/
-*.pyc
-.venv/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
 
+
+# Variables y entorno local
 .env
+.venv/
+venv/
 
+
+# Modelos y manifiestos generados
+models/*
+!models/.gitkeep
+
+
+# Temporales y logs
+*.tmp
+*.log
+
+
+# Artefactos temporales
+artifacts/
+
+
+
+# Editor y sistema operativo
 *.code-workspace
+.vscode/
+.DS_Store
+Thumbs.db

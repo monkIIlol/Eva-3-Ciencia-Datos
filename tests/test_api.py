@@ -76,6 +76,39 @@ class TestAPI(unittest.TestCase):
         self.assertIn("evaluacion_k", body)
         self.assertIn("metricas", body)
 
+    def test_business_kpis(self):
+        respuesta = self.client.get("/business-kpis")
+        self.assertEqual(respuesta.status_code, 200)
+        body = respuesta.json()
+        self.assertIn("kpis", body)
+        self.assertIn("resumen", body)
+        self.assertGreater(len(body["kpis"]), 0)
+
+    def test_data_quality(self):
+        respuesta = self.client.get("/data-quality")
+        self.assertEqual(respuesta.status_code, 200)
+        body = respuesta.json()
+        self.assertEqual(body["filas_originales"], 300)
+        self.assertIn("limpieza", body)
+
+    def test_pipeline_status(self):
+        respuesta = self.client.get("/pipeline-status")
+        self.assertEqual(respuesta.status_code, 200)
+        body = respuesta.json()
+        self.assertEqual(body["manifest"]["status"], "completed")
+        self.assertIn("runtime", body)
+
+    def test_model_evidence(self):
+        respuesta = self.client.get("/model-evidence")
+        if respuesta.status_code == 503:
+            self.skipTest("Evidencia supervisada no disponible.")
+        self.assertEqual(respuesta.status_code, 200)
+        body = respuesta.json()
+        self.assertIn("regression_predictions", body)
+        self.assertIn("classification_predictions", body)
+        self.assertIn("regression_feature_importance", body)
+        self.assertIn("classification_feature_importance", body)
+
     def test_predict_cluster(self):
         respuesta = self.client.post(
             "/predict",

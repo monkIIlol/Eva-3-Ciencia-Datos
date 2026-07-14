@@ -1,148 +1,157 @@
 # Manual de Usuario del Dashboard
 
-## 1. Objetivo del dashboard
+## 1. Objetivo
 
-El dashboard tiene como objetivo presentar los resultados del modelo de segmentación de usuarios de streaming de forma clara e interactiva.
+El dashboard presenta la solución completa de analítica de usuarios de una plataforma de streaming. No se limita a mostrar clusters: integra resultados de negocio, calidad de datos, trazabilidad del pipeline, segmentación, modelos supervisados y una demostración de inferencia mediante API.
 
-Permite visualizar los segmentos encontrados por el modelo KMeans, comparar sus principales características y apoyar la toma de decisiones de negocio relacionadas con retención, fidelización y personalización de contenido.
+Su propósito es permitir que una audiencia ejecutiva, técnica u operativa pueda responder preguntas como:
 
-## 2. Audiencia del dashboard
+- ¿qué grupos de usuarios existen y qué acciones convienen para cada uno?;
+- ¿con qué calidad y trazabilidad se generaron los resultados?;
+- ¿por qué se eligieron los modelos actuales?;
+- ¿qué significan sus métricas y limitaciones?;
+- ¿cómo responde el sistema ante un usuario real o hipotético?
 
-El dashboard está pensado para distintas audiencias:
+## 2. Acceso
 
-* usuarios ejecutivos, que necesitan una visión general de los segmentos y su valor de negocio;
-* usuarios técnicos, que necesitan revisar métricas del modelo como inercia, método del codo y coeficiente Silhouette;
-* usuarios operativos, que necesitan explorar usuarios, clusters y características específicas.
+Con Docker Compose:
 
-## 3. Vista Ejecutiva
+```text
+http://localhost:8501
+```
 
-La vista ejecutiva resume los principales resultados de la segmentación.
+El dashboard consume la URL definida en `API_BASE_URL`. Dentro de Docker se utiliza `http://api:8000`; en una ejecución local puede utilizarse `http://localhost:8000`.
 
-En esta sección se puede observar:
+La barra lateral permite:
 
-* cantidad de usuarios por cluster;
-* porcentaje de usuarios por segmento;
-* descripción general de cada grupo;
-* interpretación de negocio de los segmentos;
-* recomendaciones generales para cada tipo de usuario.
+- revisar el estado de la API;
+- actualizar los datos almacenados en caché;
+- filtrar uno o más segmentos.
 
-Los segmentos definidos son:
+## 3. Resumen ejecutivo
 
-### Cluster 0: Usuarios habituales exploradores
+Esta vista comunica resultados y acciones de negocio:
 
-Corresponde a usuarios con sesiones frecuentes, pero de menor duración. Presentan un consumo moderado y exploran distintos contenidos dentro de la plataforma.
+- usuarios analizados;
+- cantidad de segmentos;
+- gasto promedio;
+- usuarios de alto valor;
+- usuarios clasificados como valor en riesgo;
+- distribución y gasto promedio por segmento;
+- matriz de engagement y valor del cliente;
+- descripción y acción sugerida para cada perfil.
 
-Acción recomendada:
+Las acciones son recomendaciones analíticas. El proyecto no demuestra todavía un efecto causal ni un retorno económico medido.
 
-* reforzar recomendaciones personalizadas;
-* sugerir contenido relacionado;
-* incentivar la finalización de contenidos;
-* aumentar la duración de las sesiones.
+## 4. Datos y pipeline
 
-### Cluster 1: Usuarios nuevos sensibles a precio
+Esta pestaña hace visible el recorrido end-to-end:
 
-Corresponde a usuarios con menor antigüedad, menor consumo y mayor uso de promociones.
+```text
+CSV + PostgreSQL
+→ validación estructural
+→ integración one-to-one
+→ limpieza y variables derivadas
+→ KMeans y PCA
+→ regresión y clasificación
+→ API y dashboard
+```
 
-Acción recomendada:
+También muestra:
 
-* aplicar campañas de retención temprana;
-* entregar beneficios de bienvenida;
-* usar promociones controladas;
-* fomentar el hábito de consumo durante los primeros meses.
+- identificador y duración de la última ejecución;
+- filas e IDs integrados;
+- errores de validación;
+- comparación antes/después de la limpieza;
+- nulos, duplicados y valores fuera de rango;
+- outliers detectados mediante IQR;
+- reducción de memoria;
+- variables derivadas;
+- garantías de publicación y trazabilidad.
 
-### Cluster 2: Usuarios premium leales
+Los outliers se detectan y reportan, pero no se eliminan automáticamente porque pueden representar clientes reales de alto consumo o gasto.
 
-Corresponde a usuarios de alto valor, con mayor gasto, alto porcentaje de finalización y menor sensibilidad a promociones.
+## 5. Segmentación
 
-Acción recomendada:
+La pestaña de segmentación incluye:
 
-* entregar beneficios premium;
-* ofrecer contenido exclusivo;
-* priorizar estrategias de fidelización;
-* evitar descuentos innecesarios, ya que son usuarios menos sensibles a promociones.
+- `k` seleccionado;
+- inercia y método del codo;
+- coeficiente Silhouette;
+- varianza explicada por PCA;
+- proyección de usuarios en dos componentes;
+- heatmap de perfiles relativos;
+- promedios por segmento.
 
-## 4. Vista Técnica
+El Silhouette cercano a `0.231` indica separación moderada-baja. Los segmentos son interpretables, pero existe solapamiento.
 
-La vista técnica permite revisar la calidad y justificación del modelo KMeans.
+PCA se utiliza únicamente para visualización. Dos componentes conservan aproximadamente `44.9%` de la varianza, por lo que la proyección 2D no contiene toda la información de las 15 variables originales.
 
-En esta sección se pueden encontrar elementos como:
+Los números de cluster son arbitrarios. El dashboard genera etiquetas descriptivas a partir del perfil relativo de los centroides.
 
-* método del codo;
-* curva de inercia;
-* coeficiente Silhouette;
-* valor de K seleccionado;
-* comparación entre diferentes cantidades de clusters.
+## 6. Modelos predictivos
 
-El método del codo permite observar cómo disminuye la inercia a medida que aumenta la cantidad de clusters. El objetivo es identificar un punto donde agregar más clusters ya no entrega una mejora significativa.
+### Regresión
 
-El coeficiente Silhouette permite evaluar qué tan separados y compactos están los clusters. Un valor más alto indica una mejor separación entre grupos.
+Predice gasto mensual y presenta:
 
-Estas métricas ayudan a justificar la selección de 3 clusters para la segmentación final.
+- modelo ganador;
+- R² de validación cruzada y test;
+- MAE y RMSE;
+- comparación entre algoritmos;
+- gasto real frente a predicho;
+- distribución de residuos;
+- importancia de variables cuando el modelo la admite.
 
-## 5. Vista Operativa
+R² expresa proporción de variabilidad explicada; no equivale a porcentaje de precisión. MAE representa error promedio y RMSE penaliza con mayor intensidad los errores grandes.
 
-La vista operativa permite explorar los datos de manera más detallada.
+### Clasificación
 
-En esta sección se pueden revisar:
+Predice el proxy de bajo compromiso y presenta:
 
-* usuarios segmentados;
-* cluster asignado a cada usuario;
-* variables asociadas al consumo;
-* variables asociadas al perfil del usuario;
-* filtros por segmento o cluster;
-* comparación de características entre grupos.
+- modelo ganador;
+- precision, recall, F1 y ROC-AUC;
+- matriz de confusión;
+- probabilidades de riesgo en el holdout;
+- importancia de variables;
+- umbrales utilizados para construir la etiqueta.
 
-Esta vista es útil para analizar casos específicos y comprender cómo se distribuyen los usuarios dentro de cada segmento.
+`sesiones_semana` y `porcentaje_finalizacion` construyen la etiqueta histórica, por lo que se excluyen de las variables del clasificador para evitar fuga de datos.
 
-## 6. Indicadores principales
+La clase representa bajo compromiso, no churn o cancelación real.
 
-El dashboard permite analizar indicadores relevantes para interpretar los segmentos, tales como:
+## 7. Operación y demo
 
-* horas de consumo mensual promedio;
-* gasto mensual promedio;
-* cantidad promedio de contenidos vistos;
-* sesiones por semana;
-* porcentaje de finalización;
-* uso de promociones;
-* antigüedad promedio;
-* dispositivos registrados;
-* uso de aplicación móvil;
-* interacciones con soporte.
+### Usuario existente
 
-Estos indicadores permiten comparar el comportamiento de los clusters y asignarles una interpretación de negocio.
+Permite seleccionar un `id_cliente` y revisar:
 
-## 7. Uso de filtros
+- segmento asignado;
+- gasto y finalización;
+- recomendación operativa;
+- comparación frente al centroide del segmento;
+- tabla de usuarios filtrados.
 
-Cuando el dashboard incluye filtros por cluster, el usuario puede seleccionar uno o más segmentos para revisar sus características específicas.
+### Usuario nuevo
 
-Esto permite responder preguntas como:
+El simulador ejecuta tres endpoints:
 
-* ¿qué segmento tiene mayor gasto mensual?;
-* ¿qué grupo usa más promociones?;
-* ¿qué usuarios tienen mayor antigüedad?;
-* ¿qué segmento muestra mayor consumo de contenido?;
-* ¿qué grupo puede requerir campañas de retención?
+1. `/predict-gasto` estima gasto mensual;
+2. `/predict` asigna un segmento utilizando el gasto estimado;
+3. `/predict-riesgo` calcula el proxy de bajo compromiso.
 
-## 8. Interpretación de resultados
+El resultado muestra segmento, gasto, riesgo, probabilidad y acción sugerida. Los mensajes de error provienen del detalle validado por FastAPI.
 
-Los clusters entregados por KMeans no tienen un significado automático. El modelo solo asigna números como Cluster 0, Cluster 1 y Cluster 2.
+## 8. Actualización de datos
 
-La interpretación se realiza analizando los promedios y características principales de cada grupo. Por eso, el dashboard combina visualizaciones con descripciones de negocio.
+Los datos se almacenan en caché durante 60 segundos. El botón **Actualizar datos** limpia la caché y vuelve a consultar la API.
 
-Esto permite transformar el resultado técnico del modelo en información útil para la empresa.
+Después de reentrenar modelos o ejecutar nuevamente el pipeline, se recomienda actualizar el dashboard y comprobar el `run_id` de la pestaña de pipeline.
 
-## 9. Recomendaciones de uso
+## 9. Interpretación responsable
 
-Para usar correctamente el dashboard, se recomienda:
-
-1. revisar primero la vista ejecutiva para entender los segmentos principales;
-2. revisar la vista técnica para comprender por qué se eligió el número de clusters;
-3. usar la vista operativa para explorar usuarios y características específicas;
-4. comparar los indicadores promedio entre segmentos;
-5. relacionar cada segmento con acciones de negocio concretas.
-
-## 10. Conclusión
-
-El dashboard permite comunicar los resultados del modelo de segmentación de forma clara y orientada al negocio.
-
-Su principal valor es facilitar que la empresa comprenda mejor a sus usuarios y pueda tomar decisiones diferenciadas para cada segmento, en vez de aplicar una misma estrategia para todos.
+- Las métricas se obtienen con un dataset de 300 usuarios.
+- Las categorías de valor y engagement son construcciones analíticas.
+- Bajo compromiso es una etiqueta proxy.
+- Los clusters no representan grupos naturales perfectamente separados.
+- Las recomendaciones deben validarse mediante experimentación de negocio antes de implementarse a gran escala.

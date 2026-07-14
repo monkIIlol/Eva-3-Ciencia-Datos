@@ -299,6 +299,60 @@ def _verificar_salida_finita(valor: Any, nombre: str) -> float:
     return numero
 
 
+def _leer_csv_para_api(ruta: Path) -> list[dict[str, Any]]:
+    """Lee un CSV y reemplaza NaN por None para producir JSON válido."""
+    try:
+        dataframe = pd.read_csv(ruta)
+    except (OSError, pd.errors.ParserError) as exc:
+        logger.exception("No fue posible leer %s.", ruta.name)
+        raise HTTPException(
+            status_code=503,
+            detail=f"El artefacto {ruta.name} no está disponible.",
+        ) from exc
+
+    dataframe = dataframe.astype(object).where(pd.notna(dataframe), None)
+    return dataframe.to_dict(orient="records")
+
+
+def _leer_json_para_api(ruta: Path) -> dict[str, Any]:
+    """Lee un artefacto JSON publicado por el pipeline."""
+    try:
+        return _cargar_json(ruta)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        logger.exception("No fue posible leer %s.", ruta.name)
+        raise HTTPException(
+            status_code=503,
+            detail=f"El artefacto {ruta.name} no está disponible.",
+        ) from exc
+
+
+def _extraer_importancias(
+    modelo: Any | None,
+    features: list[str],
+) -> list[dict[str, Any]]:
+    """Extrae importancias de un estimador o Pipeline cuando están disponibles."""
+    if modelo is None:
+        return []
+
+    estimador = modelo
+    if hasattr(modelo, "named_steps"):
+        estimador = modelo.named_steps.get("modelo", modelo)
+
+    importancias = getattr(estimador, "feature_importances_", None)
+    if importancias is None or len(importancias) != len(features):
+        return []
+
+    pares = [
+        {"feature": feature, "importance": float(valor)}
+        for feature, valor in zip(features, importancias)
+    ]
+    return sorted(
+        pares,
+        key=lambda item: item["importance"],
+        reverse=True,
+    )
+
+
 @app.get("/")
 def inicio() -> dict[str, Any]:
     """Confirma que la API está activa e informa artefactos disponibles."""
@@ -350,6 +404,79 @@ def dashboard_data() -> dict[str, Any]:
         "centroides": centroides.to_dict(orient="records"),
         "evaluacion_k": evaluacion_k.to_dict(orient="records"),
         "metricas": artefactos.metricas_kmeans,
+    }
+
+
+@app.get("/business-kpis")
+def business_kpis() -> dict[str, Any]:
+    """Expone KPIs de engagement y valor de cliente para la vista ejecutiva."""
+    registros = _leer_csv_para_api(settings.data_dir / "kpis_negocio.csv")
+
+    usuarios_alto_valor = sum(
+        int(registro.get("usuarios") or 0)
+        for registro in registros
+        if registro.get("valor_cliente") == "alto_valor"
+    )
+    usuarios_valor_en_riesgo = sum(
+        int(registro.get("usuarios") or 0)
+        for registro in registros
+        if registro.get("valor_cliente") == "valor_en_riesgo"
+    )
+
+    return {
+        "kpis": registros,
+        "resumen": {
+            "usuarios_alto_valor": usuarios_alto_valor,
+            "usuarios_valor_en_riesgo": usuarios_valor_en_riesgo,
+        },
+    }
+
+
+@app.get("/data-quality")
+def data_quality() -> dict[str, Any]:
+    """Expone el reporte de calidad y optimización generado por el ETL."""
+    return _leer_json_para_api(settings.data_dir / "reporte_calidad.json")
+
+
+@app.get("/pipeline-status")
+def pipeline_status() -> dict[str, Any]:
+    """Expone trazabilidad de la última ejecución completa del pipeline."""
+    manifiesto = _leer_json_para_api(
+        settings.models_dir / "pipeline_manifest.json"
+    )
+    return {
+        "manifest": manifiesto,
+        "runtime": {
+            "api_status": health()["status"],
+            "artefactos": artefactos.estado(),
+        },
+    }
+
+
+@app.get("/model-evidence")
+def model_evidence() -> dict[str, Any]:
+    """Entrega predicciones holdout e interpretabilidad de los modelos ganadores."""
+    if not artefactos.metricas_supervisadas_disponibles:
+        raise HTTPException(
+            status_code=503,
+            detail="Las métricas supervisadas no están disponibles.",
+        )
+
+    return {
+        "regression_predictions": _leer_csv_para_api(
+            settings.data_dir / "predicciones_regresion_test.csv"
+        ),
+        "classification_predictions": _leer_csv_para_api(
+            settings.data_dir / "predicciones_clasificacion_test.csv"
+        ),
+        "regression_feature_importance": _extraer_importancias(
+            artefactos.modelo_regresion,
+            REGRESSION_FEATURES,
+        ),
+        "classification_feature_importance": _extraer_importancias(
+            artefactos.modelo_clasificacion,
+            CLASSIFICATION_FEATURES,
+        ),
     }
 
 
